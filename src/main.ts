@@ -211,26 +211,35 @@ const tmRows = queryEl<HTMLUListElement>("#tmRows");
 const historyRows = queryEl<HTMLUListElement>("#historyRows");
 
 attachEvents();
+showStatus("warn", "Загрузка справочников...");
 void init();
 
 async function init() {
-  const [dictionary, techAbbrev, glossary, trademarks, norms] = await Promise.all([
-    fetchJson<ParsedDictionary>("data/parsed_dictionary.json"),
-    fetchJson<TechAbbrevData>("data/tech_abbrev.json"),
-    fetchJson<GlossaryEntry[]>("data/glossary.json"),
-    fetchJson<TrademarkEntry[]>("data/trademarks.json"),
-    fetchJson<NormEntry[]>("data/norms.json"),
-  ]);
+  try {
+    const [dictionary, techAbbrev, glossary, trademarks, norms] = await Promise.all([
+      fetchJson<ParsedDictionary>("data/parsed_dictionary.json"),
+      fetchJson<TechAbbrevData>("data/tech_abbrev.json"),
+      fetchJson<GlossaryEntry[]>("data/glossary.json"),
+      fetchJson<TrademarkEntry[]>("data/trademarks.json"),
+      fetchJson<NormEntry[]>("data/norms.json"),
+    ]);
 
-  state.dictionary = dictionary;
-  state.techAbbrev = techAbbrev;
-  state.glossaryBuiltIn = glossary;
-  state.trademarksBuiltIn = trademarks;
-  state.norms = norms;
-  renderStatus();
-  renderGlossaryRows();
-  renderTrademarkRows();
-  renderHistoryRows();
+    state.dictionary = dictionary;
+    state.techAbbrev = techAbbrev;
+    state.glossaryBuiltIn = glossary;
+    state.trademarksBuiltIn = trademarks;
+    state.norms = norms;
+    renderStatus();
+    renderGlossaryRows();
+    renderTrademarkRows();
+    renderHistoryRows();
+  } catch (error) {
+    console.error("Init failed:", error);
+    showStatus(
+      "error",
+      "✗ Не удалось загрузить справочники. Обновите страницу или проверьте публикацию data/*.json",
+    );
+  }
 }
 
 function attachEvents() {
@@ -829,9 +838,11 @@ function saveStorage<T>(key: string, value: T) {
 }
 
 async function fetchJson<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+  const normalizedPath = path.replace(/^\/+/, "");
+  const urlWithBase = `${import.meta.env.BASE_URL}${normalizedPath}`;
+  const response = await fetch(urlWithBase);
   if (!response.ok) {
-    throw new Error(`Не удалось загрузить ${path}: ${response.status}`);
+    throw new Error(`Не удалось загрузить ${urlWithBase}: ${response.status}`);
   }
   return (await response.json()) as T;
 }
