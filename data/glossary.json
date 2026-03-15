@@ -1,0 +1,140 @@
+[
+  {
+    "original": "sale",
+    "replacements": ["распродажа", "сейл"],
+    "preferred": "распродажа",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "flash sale",
+    "replacements": ["срочная акция", "быстрая распродажа"],
+    "preferred": "срочная акция",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "black friday",
+    "replacements": ["чёрная пятница"],
+    "preferred": "чёрная пятница",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "new collection",
+    "replacements": ["новая коллекция"],
+    "preferred": "новая коллекция",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "best seller",
+    "replacements": ["хит продаж", "бестселлер"],
+    "preferred": "хит продаж",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "welcome",
+    "replacements": ["добро пожаловать"],
+    "preferred": "добро пожаловать",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "subscribe",
+    "replacements": ["подписаться"],
+    "preferred": "подписаться",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "check out",
+    "replacements": ["оформить заказ"],
+    "preferred": "оформить заказ",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "buy now",
+    "replacements": ["купить сейчас"],
+    "preferred": "купить сейчас",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "add to cart",
+    "replacements": ["в корзину"],
+    "preferred": "в корзину",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "cashback",
+    "replacements": ["кешбэк", "возврат средств"],
+    "preferred": "кешбэк",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "ok",
+    "replacements": ["хорошо", "окей"],
+    "preferred": "хорошо",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "vip",
+    "replacements": ["привилегированный"],
+    "preferred": "привилегированный",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "online",
+    "replacements": ["онлайн"],
+    "preferred": "онлайн",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "offline",
+    "replacements": ["офлайн"],
+    "preferred": "офлайн",
+    "type": "LAT_PROHIBITED"
+  },
+  {
+    "original": "onboarding",
+    "replacements": ["онбординг", "адаптация"],
+    "preferred": "адаптация",
+    "type": "CYR_NOT_IN_DICT"
+  },
+  {
+    "original": "барбершоп",
+    "replacements": ["мужская парикмахерская"],
+    "preferred": "мужская парикмахерская",
+    "type": "CYR_NOT_IN_DICT"
+  },
+  {
+    "original": "коворкинг",
+    "replacements": ["совместное рабочее пространство"],
+    "preferred": "совместное рабочее пространство",
+    "type": "CYR_NOT_IN_DICT"
+  },
+  {
+    "original": "кринж",
+    "replacements": ["неловкость", "стыд"],
+    "preferred": "неловкость",
+    "type": "CYR_NOT_IN_DICT"
+  },
+  {
+    "original": "вайб",
+    "replacements": ["настроение", "атмосфера"],
+    "preferred": "настроение",
+    "type": "CYR_NOT_IN_DICT"
+  },
+  {
+    "original": "лонгрид",
+    "replacements": ["длинная статья"],
+    "preferred": "длинная статья",
+    "type": "CYR_NOT_IN_DICT"
+  },
+  {
+    "original": "лайфхак",
+    "replacements": ["совет", "приём"],
+    "preferred": "совет",
+    "type": "CYR_NOT_IN_DICT"
+  },
+  {
+    "original": "фаундер",
+    "replacements": ["основатель"],
+    "preferred": "основатель",
+    "type": "CYR_NOT_IN_DICT"
+  }
+]
