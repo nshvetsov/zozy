@@ -1,4 +1,5 @@
 import "./style.css";
+import { russianStem } from "./russianStem";
 
 type ViolationType = "LAT_PROHIBITED" | "CYR_NOT_IN_DICT" | "TECH_ABBREV";
 type SourceType = "email_text" | "image_text";
@@ -563,19 +564,6 @@ function isWordAllowed(word: string, dictionary: ParsedDictionary): boolean {
   if (lower in dictionary.words) return true;
   const stem = russianStem(lower);
   return Boolean(dictionary.stems?.[stem]);
-}
-
-function russianStem(word: string): string {
-  const endings = [
-    "иями", "ями", "ами", "ого", "ему", "ому", "ыми", "ими", "ая", "яя", "ой", "ий", "ый", "ов",
-    "ев", "ей", "ам", "ям", "ах", "ях", "ом", "ем", "ы", "и", "а", "я", "е", "о", "у", "ю", "ь",
-  ];
-  for (const ending of endings) {
-    if (word.endsWith(ending) && word.length - ending.length >= 3) {
-      return word.slice(0, -ending.length);
-    }
-  }
-  return word;
 }
 
 function isTechAbbreviation(value: string, techAbbrev: TechAbbrevData): boolean {
