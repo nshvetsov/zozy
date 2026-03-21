@@ -16,10 +16,20 @@ DICT_FILES = {
 
 HEADWORD_PATTERN = re.compile(r"^([А-ЯЁа-яё][а-яёА-ЯЁ\-]{1,40})")
 STEMMER = SnowballStemmer("russian")
-REQUIRED_SMOKE_WORDS = ("маркетинг", "бонус", "распродажа", "красивый", "доставка")
+REQUIRED_SMOKE_WORDS = ("маркетинг", "бонус", "распродажа", "красивый", "доставка", "долгожданный")
+
+
+def _normalize_extracted_text(text: str) -> str:
+    # PDF text extraction occasionally injects private-use glyphs inside words
+    # (for example: "ДОЛГОЖДА\uf401ННЫЙ"). Drop them before headword parsing.
+    text = re.sub(r"[\uf000-\uf8ff]", "", text)
+    text = re.sub(r"[\u0300\u0301]", "", text)
+    text = text.replace("\u00ad", "")
+    return text
 
 
 def _collect_words(text: str, words: set[str]) -> None:
+    text = _normalize_extracted_text(text)
     for line in text.splitlines():
         line = line.strip()
         match = HEADWORD_PATTERN.match(line)

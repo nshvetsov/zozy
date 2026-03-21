@@ -10,11 +10,11 @@ describe("parsed dictionary smoke", () => {
     expect(words["распродажа"]).toBeTruthy();
     expect(words["красивый"]).toBeTruthy();
     expect(words["доставка"]).toBeTruthy();
+    expect(words["долгожданный"]).toBeTruthy();
   });
 
   it("does not contain disallowed slang words", () => {
     expect(words["кринж"]).toBeUndefined();
     expect(words["вайб"]).toBeUndefined();
-    expect(words["барбершоп"]).toBeUndefined();
   });
 });

@@ -10,7 +10,7 @@ body {
 }
 
 #app {
-  max-width: 1200px;
+  max-width: 1320px;
   margin: 0 auto;
   padding: 16px;
 }
@@ -80,6 +80,13 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+  pointer-events: none;
+  filter: saturate(0.4);
+}
+
 button.danger {
   border-color: #be2f2f;
   background: #be2f2f;
@@ -122,10 +129,146 @@ button.danger {
   color: #912727;
 }
 
+.ocr-status {
+  border-left: 4px solid #6f87a5;
+  background: #eef4fb;
+  color: #2d4764;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.ocr-status.warn {
+  border-left-color: #c2862e;
+  background: #fff7e7;
+  color: #815000;
+}
+
 .hint {
   border-left: 4px solid #c8962f;
   background: #fff9ee;
   padding: 8px 10px;
+}
+
+.checker-split {
+  display: grid;
+  grid-template-columns: 850px minmax(320px, 420px);
+  gap: 12px;
+  align-items: start;
+}
+
+.checker-split.no-preview {
+  grid-template-columns: 1fr;
+}
+
+.preview {
+  border: 1px solid #d6e0ea;
+  border-radius: 10px;
+  padding: 10px;
+  background: #f9fbfd;
+  display: grid;
+  gap: 8px;
+}
+
+.preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.preview-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.preview-hint {
+  border-left: 3px solid #8ca4bf;
+  background: #eef4fb;
+  color: #355170;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.preview-legend {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.legend-item {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  border: 1px solid transparent;
+}
+
+.legend-ok {
+  background: rgba(44, 178, 91, 0.14);
+  border-color: rgba(44, 178, 91, 0.35);
+}
+
+.legend-violation {
+  background: rgba(220, 38, 38, 0.24);
+  border-color: rgba(220, 38, 38, 0.5);
+}
+
+.legend-tech {
+  background: rgba(234, 146, 26, 0.28);
+  border-color: rgba(234, 146, 26, 0.55);
+}
+
+.preview-frame {
+  width: 100%;
+  min-height: 360px;
+  border: 1px solid #d2dce8;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.violations-panel {
+  border: 1px solid #d6e0ea;
+  border-radius: 10px;
+  background: #f9fbfd;
+  padding: 10px;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 10px;
+  min-height: 0;
+}
+
+.violations-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.violations-header h2 {
+  margin: 0;
+}
+
+.review-filter {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.review-filter button {
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid #b8c8d9;
+  background: #fff;
+  color: #1b3552;
+}
+
+.review-filter button.active {
+  background: #1f64b8;
+  border-color: #1f64b8;
+  color: #fff;
 }
 
 .list {
@@ -133,6 +276,12 @@ button.danger {
   padding-left: 18px;
   display: grid;
   gap: 10px;
+}
+
+.violations-list {
+  padding-left: 0;
+  overflow: auto;
+  min-height: 0;
 }
 
 .badge {
@@ -167,6 +316,25 @@ pre {
   padding: 10px;
 }
 
+.violation-card.preview-link {
+  cursor: pointer;
+}
+
+.violation-card.active-preview {
+  border-color: #1f64b8;
+  box-shadow: inset 0 0 0 1px #1f64b8;
+}
+
+.violation-card.review-ok {
+  border-color: #9ecab0;
+  background: #eff9f2;
+}
+
+.violation-card.review-issue {
+  border-color: #dfc08f;
+  background: #fff8eb;
+}
+
 .violation-title {
   margin-bottom: 6px;
 }
@@ -188,7 +356,14 @@ td {
   display: none;
 }
 
+@media (max-width: 1400px) {
+  .checker-split {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 900px) {
+
   .grid-form {
     grid-template-columns: 1fr;
   }
