@@ -23,6 +23,7 @@ export interface JobRunnerTrademark {
 export interface RunCheckJobOptions {
   apiKey: string;
   fetchImpl?: typeof fetch;
+  urlProxyEndpoint?: string;
   norms: JobRunnerNorm[];
   glossaryMap: Map<string, JobRunnerGlossaryEntry>;
   trademarks: JobRunnerTrademark[];
@@ -156,7 +157,13 @@ export async function runCheckJob(
   job: CheckJob,
   options: RunCheckJobOptions,
 ): Promise<RunCheckJobResult> {
-  const html = job.html || (await loadSourceHtml(job, options.signal));
+  const html =
+    job.html ||
+    (await loadSourceHtml(job, {
+      signal: options.signal,
+      fetchImpl: options.fetchImpl,
+      urlProxyEndpoint: options.urlProxyEndpoint,
+    }));
   const plainText = extractVisibleTextFromHtml(html);
   if (!plainText.trim()) {
     return { html, plainText, violations: [], checkedWords: [] };

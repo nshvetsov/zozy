@@ -157,6 +157,7 @@ const USER_GLOSSARY_KEY = "user_glossary";
 const USER_TRADEMARKS_KEY = "user_trademarks";
 const GOSSLOVAR_API_KEY = "gosslovar_api_key";
 const HISTORY_KEY = "checks_history";
+const URL_SOURCE_PROXY_ENDPOINT = "https://functions.yandexcloud.net/d4efv16nna2p2eiie8cb";
 
 const rootCandidate = document.querySelector<HTMLDivElement>("#app");
 if (!rootCandidate) throw new Error("Root element #app not found");
@@ -656,6 +657,7 @@ async function runCheck() {
       try {
         const result = await runCheckJob(job, {
           apiKey: state.apiKey,
+          urlProxyEndpoint: URL_SOURCE_PROXY_ENDPOINT,
           norms: state.norms.map((norm) => ({ code: norm.code, norm: norm.norm, url: norm.url })),
           glossaryMap,
           trademarks: trademarks.map((item) => ({ name: item.name })),
@@ -728,13 +730,14 @@ function explainJobError(error: unknown, job: CheckJob): string {
   const message = (error as Error)?.message ?? "";
   let mapped = explainApiError(error);
   if (job.sourceType === "url" && message.includes("URL_SOURCE_PROXY_FAILED")) {
-    mapped = "не удалось загрузить HTML по URL ни напрямую, ни через proxy (возможны CORS/защита источника или закрытый доступ по cookie).";
+    mapped =
+      "не удалось загрузить HTML по URL через Yandex Cloud Function proxy (проверьте endpoint, CORS и доступность источника).";
   }
   if (job.sourceType === "url" && message.includes("URL_SOURCE_TIMEOUT")) {
     mapped = "не удалось загрузить HTML по URL: источник не ответил в разумное время (таймаут).";
   }
   if (job.sourceType === "url" && (message.includes("URL_SOURCE_FETCH_FAILED") || message.includes("Failed to fetch"))) {
-    mapped = "не удалось загрузить HTML по URL из браузера (вероятно CORS/блокировка источника).";
+    mapped = "не удалось загрузить HTML по URL через proxy endpoint. Проверьте настройки Yandex Cloud Function и CORS.";
   }
   return mapped;
 }

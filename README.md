@@ -33,6 +33,15 @@
 - обратитесь к поставщику API для разрешения origin;
 - либо используйте прокси/другой способ доставки запросов.
 
+## URL-проверка в production через Yandex Cloud Function
+
+Для проверки URL-источников в production добавьте серверный proxy endpoint:
+
+1. Разверните функцию из `cloud-functions/yandex-url-proxy/index.js`.
+2. Убедитесь, что функция доступна по адресу `https://functions.yandexcloud.net/d4efv16nna2p2eiie8cb`.
+
+URL-источники загружаются через этот endpoint (а не напрямую из браузера), что обходит CORS-ограничения статического хостинга.
+
 ## Локальный запуск
 
 ```bash

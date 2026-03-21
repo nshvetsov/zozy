@@ -48,4 +48,31 @@ describe("loadSourceHtml", () => {
     const html = await loadSourceHtml(job);
     expect(html).toContain("from-url");
   });
+
+  it("uses configured proxy endpoint for url source", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://proxy.example/proxy") {
+        return new Response("<html><body>from-proxy-endpoint</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const job: CheckJob = {
+      id: "3",
+      sourceType: "url",
+      sourceName: "url",
+      sourceValue: "https://example.com/mail",
+      ...createBaseJob(),
+    };
+    const html = await loadSourceHtml(job, { urlProxyEndpoint: "https://proxy.example/proxy" });
+    expect(html).toContain("from-proxy-endpoint");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://proxy.example/proxy",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
 });
