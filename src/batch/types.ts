@@ -33,6 +33,8 @@ export interface CheckJob {
   sourceType: CheckJobSourceType;
   sourceName: string;
   sourceValue: string;
+  sourceMessageName?: string;
+  sourceMessageLink?: string;
   sourceFile?: File;
   html: string;
   plainText: string;

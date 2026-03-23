@@ -10,6 +10,8 @@ describe("buildViolationsCsvUtf8Sig", () => {
         sourceType: "file",
         sourceName: "mail.html",
         sourceValue: "mail.html",
+        sourceMessageName: "Promo 2026-03",
+        sourceMessageLink: "https://mindbox.example/messages/123",
         html: "<html/>",
         plainText: "VR",
         status: "done",
@@ -35,5 +37,7 @@ describe("buildViolationsCsvUtf8Sig", () => {
     expect(csv).toContain("source_type");
     expect(csv).toContain("LAT_PROHIBITED");
     expect(csv).toContain("mail.html");
+    expect(csv).toContain("Promo 2026-03");
+    expect(csv).toContain("https://mindbox.example/messages/123");
   });
 });

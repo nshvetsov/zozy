@@ -166,6 +166,9 @@ export async function runCheckJob(
     }));
   const plainText = extractVisibleTextFromHtml(html);
   if (!plainText.trim()) {
+    if (job.sourceType === "url") {
+      throw new Error("URL_SOURCE_EMPTY_TEXT");
+    }
     return { html, plainText, violations: [], checkedWords: [] };
   }
 
@@ -177,7 +180,7 @@ export async function runCheckJob(
     pollIntervalMs: options.pollIntervalMs ?? 3000,
     signal: options.signal,
     onChunkStart: (chunkIndex, totalChunks) => {
-      options.onProgress?.(`Проверка через API: чанк ${chunkIndex}/${totalChunks}`);
+      options.onProgress?.(`Проверяем текст письма (${chunkIndex}/${totalChunks})`);
     },
   });
 

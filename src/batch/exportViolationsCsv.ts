@@ -4,6 +4,8 @@ export interface CsvViolationRow {
   source_type: "file" | "url";
   source_name: string;
   source_value: string;
+  message_name: string;
+  message_link: string;
   job_status: string;
   word: string;
   type: string;
@@ -24,7 +26,7 @@ function escapeCsv(value: string): string {
 function toCsv(rows: CsvViolationRow[]): string {
   if (!rows.length) {
     return [
-      "source_type,source_name,source_value,job_status,word,type,start,end,risk,norm,norm_url,replacement_1,replacement_2,replacement_3",
+      "source_type,source_name,source_value,message_name,message_link,job_status,word,type,start,end,risk,norm,norm_url,replacement_1,replacement_2,replacement_3",
     ].join("\n");
   }
   const headers = Object.keys(rows[0]);
@@ -43,6 +45,8 @@ export function buildViolationsCsvUtf8Sig(jobs: CheckJob[]): string {
         source_type: job.sourceType,
         source_name: job.sourceName,
         source_value: job.sourceValue,
+        message_name: job.sourceMessageName ?? "",
+        message_link: job.sourceMessageLink ?? "",
         job_status: job.status,
         word: violation.word,
         type: violation.type,

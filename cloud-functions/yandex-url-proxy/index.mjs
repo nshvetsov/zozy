@@ -86,7 +86,7 @@ export async function handler(event = {}) {
       method: "GET",
       redirect: "follow",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; zozyaz-url-proxy/1.0)",
+        "User-Agent": "Mozilla/5.0 (compatible; zozy-url-proxy/1.0)",
         Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
       },
       signal: AbortSignal.timeout(15000),

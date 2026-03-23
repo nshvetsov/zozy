@@ -79,7 +79,7 @@ function sanitizeHtmlDocument(doc: Document) {
   doc.querySelectorAll("[hidden], [aria-hidden='true']").forEach((node) => node.remove());
   doc.querySelectorAll<HTMLElement>("[style]").forEach((node) => {
     const style = node.getAttribute("style")?.toLowerCase().replace(/\s+/g, "") ?? "";
-    if (style.includes("display:none") || style.includes("font-size:0") || style.includes("max-height:0")) {
+    if (style.includes("display:none")) {
       node.remove();
     }
   });
