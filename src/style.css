@@ -291,7 +291,20 @@ button.danger {
 .hint {
   border-left: 4px solid #c8962f;
   background: #fff9ee;
+  color: #815000;
   padding: 8px 10px;
+}
+
+.hint.ok {
+  border-left-color: #2f9d4b;
+  background: #eefaf1;
+  color: #1f6b34;
+}
+
+.hint.error {
+  border-left-color: #c53f3f;
+  background: #fff1f1;
+  color: #8b2424;
 }
 
 .checker-split {
@@ -642,6 +655,11 @@ pre {
 
 .rules-form {
   grid-template-columns: 1.2fr 1.2fr 1.4fr 180px auto;
+}
+
+.rules-form input:disabled {
+  background: #f5f8fb;
+  color: #8ba0b6;
 }
 
 .secondary-toolbar {

@@ -1,10 +1,12 @@
 import "./style.css";
+import { collectPlainTextViolations, filterViolationsByGlossaryAndTrademarks } from "./check/textCheck";
 import { buildHtmlPreviewModel } from "./htmlPreview";
 import { recognizeImageText, type BrowserOcrResult } from "./browserOcr";
 import { extractHtmlImages, type HtmlImageAsset } from "./htmlImages";
 import { buildViolationsCsvUtf8Sig } from "./batch/exportViolationsCsv";
 import { runCheckJob } from "./batch/jobRunner";
 import type { CheckJob } from "./batch/types";
+import { createDictionaryFromBuffer, type DictionarySqlite } from "./dictionary/openLookupDb";
 import {
   renderImageOverlays,
   type ImageOverlayAsset,
@@ -12,9 +14,11 @@ import {
   type ImageViolationRange,
 } from "./imageOverlay";
 import { renderPreviewWithOverlay, type OverlayRange, type PreviewRenderHandle } from "./previewOverlay";
-import { russianStem } from "./russianStem";
+import { buildRulesCsv, parseRulesCsv } from "./rules/csv";
+import { buildRulesContext, normalizeRulePhrase, type RuleEntry } from "./rules/domain";
+import { loadRulesUser, saveRulesUser } from "./rules/storage";
 
-type ViolationType = "LAT_PROHIBITED" | "CYR_NOT_IN_DICT" | "TECH_ABBREV";
+type ViolationType = "LAT_PROHIBITED" | "CYR_NOT_IN_DICT";
 type SourceType = "email_text" | "image_text";
 
 interface GlossaryEntry {
@@ -31,41 +35,10 @@ interface TrademarkEntry {
   note?: string;
 }
 
-interface RuleEntry {
-  phrase: string;
-  mode: "allow" | "deny";
-  reason: string;
-  replacements: string[];
-}
-
 interface NormEntry {
   code: ViolationType;
   norm: string;
   url: string;
-}
-
-interface ParsedDictionary {
-  words: Record<string, string[]>;
-  stems?: Record<string, boolean>;
-}
-
-interface TechAbbrevData {
-  abbreviations: string[];
-}
-
-interface Token {
-  raw: string;
-  normalized: string;
-  start: number;
-  end: number;
-}
-
-interface PhraseMatch {
-  phrase: string;
-  startTokenIdx: number;
-  endTokenIdx: number;
-  start: number;
-  end: number;
 }
 
 interface Violation {
@@ -76,7 +49,7 @@ interface Violation {
   sourceDetails?: string;
   imageAssetId?: string;
   type: ViolationType;
-  risk: "HIGH" | "MEDIUM" | "LOW";
+  risk: "HIGH" | "MEDIUM";
   norm: string;
   normUrl?: string;
   replacements: string[];
@@ -133,9 +106,6 @@ interface LegacyHistoryEntry {
   };
 }
 
-const USER_GLOSSARY_KEY = "user_glossary";
-const USER_RULES_KEY = "user_rules";
-const GOSSLOVAR_API_KEY = "gosslovar_api_key";
 const HISTORY_KEY = "checks_history";
 const URL_SOURCE_PROXY_ENDPOINT = "https://functions.yandexcloud.net/d4efv16nna2p2eiie8cb";
 
@@ -144,14 +114,12 @@ if (!rootCandidate) throw new Error("Root element #app not found");
 const root: HTMLDivElement = rootCandidate;
 
 const state = {
-  dictionary: null as ParsedDictionary | null,
-  techAbbrev: null as TechAbbrevData | null,
+  dictionarySqlite: null as DictionarySqlite | null,
   glossaryBuiltIn: [] as GlossaryEntry[],
-  rulesUser: loadRulesUser(),
+  rulesUser: loadRulesUser(localStorage),
   trademarksBuiltIn: [] as TrademarkEntry[],
   norms: [] as NormEntry[],
   history: loadHistoryEntries(),
-  apiKey: loadStorage<string>(GOSSLOVAR_API_KEY, ""),
   jobs: [] as CheckJob[],
   selectedJobId: null as string | null,
   emailText: "",
@@ -176,20 +144,6 @@ root.innerHTML = `
       <div class="nav-right">
         <div class="nav-utilities">
           <span id="statusDot" class="status-dot hidden" aria-label="Статус сервиса"></span>
-          <div class="nav-api-key">
-            <span id="apiKeyNavDisplay"></span>
-            <button id="apiKeyNavEditBtn" type="button" class="btn-ghost icon-btn" aria-label="Редактировать API ключ">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 20h4l10.4-10.4-4-4L4 16v4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                <path d="M12.9 6.6l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-              </svg>
-            </button>
-            <div id="apiKeyDetails" class="api-key-popup hidden">
-              <label class="field">
-                <input id="apiKeyInput" type="password" placeholder="GS-..." autocomplete="off" />
-              </label>
-            </div>
-          </div>
         </div>
         <div class="nav-menu">
           <button data-tab-btn="rules" type="button">Правила</button>
@@ -288,10 +242,6 @@ root.innerHTML = `
   </main>
 `;
 
-const apiKeyInput = queryEl<HTMLInputElement>("#apiKeyInput");
-const apiKeyDetails = queryEl<HTMLDivElement>("#apiKeyDetails");
-const apiKeyNavDisplay = queryEl<HTMLSpanElement>("#apiKeyNavDisplay");
-const apiKeyNavEditBtn = queryEl<HTMLButtonElement>("#apiKeyNavEditBtn");
 const urlListInput = queryEl<HTMLTextAreaElement>("#urlListInput");
 const emailInput = queryEl<HTMLTextAreaElement>("#emailText");
 const manualHtmlToggleBtn = queryEl<HTMLButtonElement>("#manualHtmlToggleBtn");
@@ -338,7 +288,6 @@ let activeCheckController: AbortController | null = null;
 const RUN_CHECK_DEFAULT_LABEL = "Проверить";
 const RUN_CHECK_BUSY_LABEL = "Проверка...";
 
-apiKeyInput.value = state.apiKey;
 attachEvents();
 showStatus("warn", "Загрузка настроек...");
 void init();
@@ -359,15 +308,22 @@ function updateExportButtonState(inProgress: boolean) {
 
 async function init() {
   try {
-    const [glossary, trademarks, norms] = await Promise.all([
+    const base = import.meta.env.BASE_URL.replace(/\/?$/, "/");
+    const sqliteUrl = `${base}data/lookup.sqlite`;
+    const [glossary, trademarks, norms, sqliteBuf] = await Promise.all([
       fetchJson<GlossaryEntry[]>("data/glossary.json"),
       fetchJson<TrademarkEntry[]>("data/trademarks.json"),
       fetchJson<NormEntry[]>("data/norms.json"),
+      fetch(sqliteUrl).then((r) => {
+        if (!r.ok) throw new Error(`lookup.sqlite: ${r.status}`);
+        return r.arrayBuffer();
+      }),
     ]);
 
     state.glossaryBuiltIn = glossary;
     state.trademarksBuiltIn = trademarks;
     state.norms = norms;
+    state.dictionarySqlite = await createDictionaryFromBuffer(sqliteBuf);
     renderStatus();
     renderRulesRows();
     renderHistoryRows();
@@ -376,7 +332,7 @@ async function init() {
     console.error("Init failed:", error);
     showStatus(
       "error",
-      "✗ Не удалось загрузить данные. Обновите страницу или проверьте публикацию data/*.json",
+      "✗ Не удалось загрузить данные или словарь SQLite. Обновите страницу или проверьте data/* и lookup.sqlite",
     );
   }
 }
@@ -388,16 +344,6 @@ function attachEvents() {
     });
   });
 
-  apiKeyInput.addEventListener("input", () => {
-    state.apiKey = apiKeyInput.value.trim();
-    saveStorage(GOSSLOVAR_API_KEY, state.apiKey);
-    if (state.apiKey) apiKeyDetails.classList.add("hidden");
-    renderStatus();
-  });
-  apiKeyNavEditBtn.addEventListener("click", () => {
-    apiKeyDetails.classList.toggle("hidden");
-    if (!apiKeyDetails.classList.contains("hidden")) apiKeyInput.focus();
-  });
   manualHtmlToggleBtn.addEventListener("click", () => {
     manualHtmlArea.classList.toggle("hidden");
     manualHtmlToggleBtn.textContent = manualHtmlArea.classList.contains("hidden")
@@ -442,53 +388,37 @@ function attachEvents() {
     downloadFile("violations.csv", csv, "text/csv;charset=utf-8");
   });
 
-  addRuleBtn.addEventListener("click", () => {
-    const phrase = rulePhraseInput.value.trim().toLowerCase();
-    if (!phrase) return;
-    const mode: RuleEntry["mode"] = ruleModeInput.value === "deny" ? "deny" : "allow";
-    const reason = ruleReasonInput.value.trim();
-    const replacements = mode === "deny"
-      ? ruleReplacementsInput.value
-          .split(",")
-          .map((x) => x.trim())
-          .filter(Boolean)
-      : [];
-    const next: RuleEntry[] = [
-      ...state.rulesUser.filter((item) => item.phrase.toLowerCase() !== phrase),
-      { phrase, mode, reason, replacements },
-    ];
-    state.rulesUser = next;
-    saveStorage(USER_RULES_KEY, state.rulesUser);
-    rulePhraseInput.value = "";
-    ruleReasonInput.value = "";
-    ruleReplacementsInput.value = "";
-    ruleModeInput.value = "allow";
-    renderRulesRows();
+  ruleModeInput.addEventListener("change", syncRulesFormState);
+  addRuleBtn.addEventListener("click", saveRuleFromForm);
+  rulesRows.addEventListener("click", (event) => {
+    const removeBtn = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-remove-rule]");
+    if (!removeBtn) return;
+    const key = removeBtn.dataset.removeRule ?? "";
+    removeRuleByPhrase(key);
   });
 
   exportRulesCsvBtn.addEventListener("click", () => {
-    const rows = state.rulesUser.map((item) => ({
-      phrase: item.phrase,
-      mode: item.mode,
-      reason: item.reason,
-      replacements: item.replacements.join("|"),
-    }));
-    downloadFile("user_rules.csv", toCsv(rows));
+    downloadFile("user_rules.csv", buildRulesCsv(state.rulesUser));
   });
 
-  importRulesCsvInput.addEventListener("change", () => {
+  importRulesCsvInput.addEventListener("change", async () => {
     const file = importRulesCsvInput.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const text = String(reader.result ?? "");
+    try {
+      const text = await readTextFile(file);
       const imported = parseRulesCsv(text);
       state.rulesUser = imported;
-      saveStorage(USER_RULES_KEY, state.rulesUser);
+      saveRulesUser(localStorage, state.rulesUser);
       renderRulesRows();
-    };
-    reader.readAsText(file);
+      showNotice("ok", `Импортировано правил: ${state.rulesUser.length}.`);
+    } catch (error) {
+      console.error("Rules CSV import failed:", error);
+      showNotice("error", "Не удалось импортировать CSV правил.");
+    } finally {
+      importRulesCsvInput.value = "";
+    }
   });
+  syncRulesFormState();
 }
 
 interface EnqueueOptions {
@@ -522,7 +452,7 @@ async function enqueueSources(options: EnqueueOptions = {}): Promise<number> {
   const urlEntries: UrlSourceEntry[] = urls.map((url) => ({ url }));
 
   if (!files.length && !urls.length) {
-    if (warnIfEmpty) showStatus("warn", "Добавьте хотя бы один .html файл или URL.");
+    if (warnIfEmpty) showNotice("warn", "Добавьте хотя бы один .html файл или URL.");
     return 0;
   }
 
@@ -550,7 +480,7 @@ async function enqueueSources(options: EnqueueOptions = {}): Promise<number> {
   sourceFileInput.value = "";
   renderJobsList();
   const addedCount = jobsFromFiles.length + addedUrlsCount;
-  showStatus("ok", `Добавлено в очередь: ${addedCount}`);
+  showNotice("ok", `Добавлено в очередь: ${addedCount}`);
   return addedCount;
 }
 
@@ -620,7 +550,7 @@ async function importTemplateUrlsFromCsv() {
     const content = await readTextFile(file, "utf-8");
     const parsed = parseTemplateUrlsCsv(content);
     if (!parsed.ok) {
-      showStatus("error", parsed.error);
+      showNotice("error", parsed.error);
       return;
     }
     const { addedCount, skippedDuplicates } = appendUrlJobs(parsed.entries);
@@ -628,22 +558,22 @@ async function importTemplateUrlsFromCsv() {
     renderJobsList();
     if (!addedCount) {
       if (skippedDuplicates || parsed.skippedInvalid || parsed.skippedEmpty) {
-        showStatus(
+        showNotice(
           "warn",
           `CSV обработан: новых ссылок нет (дубли: ${skippedDuplicates}, пустые: ${parsed.skippedEmpty}, некорректные: ${parsed.skippedInvalid}).`,
         );
       } else {
-        showStatus("warn", "CSV обработан: валидных ссылок в столбце template не найдено.");
+        showNotice("warn", "CSV обработан: валидных ссылок в столбце template не найдено.");
       }
       return;
     }
-    showStatus(
+    showNotice(
       "ok",
       `Добавлено из CSV: ${addedCount} (дубли: ${skippedDuplicates}, пустые: ${parsed.skippedEmpty}, некорректные: ${parsed.skippedInvalid}).`,
     );
   } catch (error) {
     console.error("CSV template import failed:", error);
-    showStatus("error", "Не удалось прочитать CSV-файл.");
+    showNotice("error", "Не удалось прочитать CSV-файл.");
   } finally {
     templateCsvFileInput.value = "";
   }
@@ -700,16 +630,14 @@ async function selectJob(jobId: string) {
 
 async function runCheck() {
   if (state.isChecking) return;
-  if (!state.apiKey) {
-    showStatus("error", "✗ Укажите API ключ ГосСловарь в поле выше.");
-    apiKeyDetails.classList.remove("hidden");
-    apiKeyInput.focus();
+  if (!state.dictionarySqlite) {
+    showNotice("error", "✗ Словарь ещё не загружен. Дождитесь индикатора готовности или обновите страницу.");
     return;
   }
   await enqueueSources({ includeUrls: true, warnIfEmpty: false });
   const pendingJobs = state.jobs.filter((job) => job.status === "pending" || job.status === "error");
   if (!pendingJobs.length) {
-    showStatus("warn", "Нет задач для проверки. Добавьте .html файлы или URL в очередь.");
+    showNotice("warn", "Нет задач для проверки. Добавьте .html файлы или URL в очередь.");
     return;
   }
 
@@ -725,8 +653,7 @@ async function runCheck() {
   checkProgress.classList.remove("hidden");
   setCheckControls(true);
   renderViolations();
-  techHint.classList.add("hidden");
-  techHint.textContent = "";
+  clearNotice();
   const rulesContext = buildRulesContext(state.rulesUser);
   const glossaryMap = buildGlossaryMap([...state.glossaryBuiltIn, ...rulesContext.denyGlossary]) as Map<
     string,
@@ -749,15 +676,11 @@ async function runCheck() {
       }
       try {
         const result = await runCheckJob(job, {
-          apiKey: state.apiKey,
           urlProxyEndpoint: URL_SOURCE_PROXY_ENDPOINT,
           norms: state.norms.map((norm) => ({ code: norm.code, norm: norm.norm, url: norm.url })),
           glossaryMap,
           trademarks: allowedTerms.map((item) => ({ name: item })),
-          chunkSize: 650,
-          jitterMinMs: 100,
-          jitterMaxMs: 500,
-          pollIntervalMs: 3000,
+          cyrillicLookup: state.dictionarySqlite,
           signal: controller.signal,
           onProgress: (label) => {
             job.status = "checking";
@@ -765,7 +688,6 @@ async function runCheck() {
             renderJobsList();
             if (state.selectedJobId === job.id) {
               state.checkProgressLabel = label;
-              showStatus("warn", label);
               renderViolations();
             }
           },
@@ -776,6 +698,7 @@ async function runCheck() {
         job.checkedWords = result.checkedWords as CheckJob["checkedWords"];
         job.status = "done";
         job.progressLabel = `Готово: ${job.violations.length} нарушений`;
+        appendHistoryEntryFromJob(job);
       } catch (error) {
         if (controller.signal.aborted) {
           job.status = "cancelled";
@@ -802,10 +725,10 @@ async function runCheck() {
       .filter((job) => job.status === "done")
       .reduce((sum, job) => sum + job.violations.length, 0);
     const elapsedSec = Math.max(1, Math.round((Date.now() - startedAtMs) / 1000));
-    showStatus("ok", `Проверено: ${checkedCount} писем, нарушений: ${violationsCount}, время: ${elapsedSec} сек.`);
+    showNotice("ok", `Проверено: ${checkedCount} писем, нарушений: ${violationsCount}, время: ${elapsedSec} сек.`);
   } finally {
     if (controller.signal.aborted) {
-      showStatus("warn", "Проверка остановлена пользователем.");
+      showNotice("warn", "Проверка остановлена пользователем.");
     }
     state.isChecking = false;
     state.checkProgressLabel = "";
@@ -818,17 +741,9 @@ async function runCheck() {
   }
 }
 
-function explainApiError(error: unknown): string {
-  const message = (error as Error)?.message ?? "";
-  if (message.includes("401")) return "неверный API ключ (401).";
-  if (message.includes("429")) return "лимит запросов исчерпан, попробуйте позже (429).";
-  if (message.includes("Failed to fetch")) return "не удалось обратиться к API (возможен CORS или сеть).";
-  return message || "неизвестная ошибка API.";
-}
-
 function explainJobError(error: unknown, job: CheckJob): string {
   const message = (error as Error)?.message ?? "";
-  let mapped = explainApiError(error);
+  let mapped = message || "неизвестная ошибка.";
   if (job.sourceType === "url" && message.includes("URL_SOURCE_PROXY_FAILED")) {
     mapped =
       "не удалось загрузить HTML по URL через Yandex Cloud Function proxy (проверьте endpoint, CORS и доступность источника).";
@@ -847,7 +762,7 @@ function explainJobError(error: unknown, job: CheckJob): string {
 }
 
 async function runImageOcr() {
-  if (!state.dictionary || !state.techAbbrev) return;
+  if (!state.dictionarySqlite) return;
   if (!isHtmlLike(state.emailText)) {
     showOcrStatus("Вставьте HTML письма с изображениями, чтобы запустить OCR.", true);
     return;
@@ -897,8 +812,7 @@ async function runImageOcr() {
       const checkResult = checkSingleText(
         result.text,
         "image_text",
-        state.dictionary,
-        state.techAbbrev,
+        state.dictionarySqlite,
         state.norms,
         glossaryMap,
         allowedTerms.map((item) => ({ name: item, type: "trademark" as const })),
@@ -935,215 +849,36 @@ async function runImageOcr() {
 function checkSingleText(
   inputText: string,
   source: SourceType,
-  dictionary: ParsedDictionary,
-  techAbbrev: TechAbbrevData,
+  lookup: DictionarySqlite,
   norms: NormEntry[],
   glossaryMap: Map<string, GlossaryEntry>,
   trademarks: TrademarkEntry[],
 ): CheckResult {
-  const text = inputText;
-  const tokens = tokenize(text);
-  const phrasePool = [
-    ...Array.from(glossaryMap.keys()).filter((phrase) => phrase.includes(" ")),
-    ...trademarks.map((item) => item.name.toLowerCase()).filter((name) => name.includes(" ")),
-  ];
-  const phraseMatches = matchPhrasesLongest(tokens, phrasePool);
-  const consumedIndexes = new Set<number>();
-  const violations: Violation[] = [];
-
-  for (const match of phraseMatches) {
-    for (let i = match.startTokenIdx; i <= match.endTokenIdx; i += 1) consumedIndexes.add(i);
-    const phraseText = text.slice(match.start, match.end);
-    if (isTrademarkPhrase(match, tokens, trademarks)) continue;
-    const normType = "LAT_PROHIBITED";
-    const isTech = isTechAbbreviation(phraseText, techAbbrev);
-    const type: ViolationType = isTech ? "TECH_ABBREV" : normType;
-    const norm = getNorm(type, norms);
-    violations.push({
-      word: phraseText,
-      position: { start: match.start, end: match.end },
-      source,
-      type,
-      risk: getRisk(type),
-      norm: norm.norm,
-      normUrl: norm.url,
-      replacements: getReplacements(phraseText, glossaryMap),
-    });
-  }
-
-  tokens.forEach((token, idx) => {
-    if (consumedIndexes.has(idx)) return;
-    if (isTrademarkToken(token.normalized, trademarks)) return;
-
-    if (isCyrillicWord(token.normalized)) {
-      if (!isWordAllowed(token.normalized, dictionary)) {
-        const norm = getNorm("CYR_NOT_IN_DICT", norms);
-        violations.push({
-          word: token.raw,
-          position: { start: token.start, end: token.end },
-          source,
-          type: "CYR_NOT_IN_DICT",
-          risk: "MEDIUM",
-          norm: norm.norm,
-          normUrl: norm.url,
-          replacements: getReplacements(token.raw, glossaryMap),
-        });
-      }
-      return;
-    }
-
-    if (isLatinWord(token.normalized)) {
-      const type: ViolationType = isTechAbbreviation(token.raw, techAbbrev)
-        ? "TECH_ABBREV"
-        : "LAT_PROHIBITED";
-      const norm = getNorm(type, norms);
-      violations.push({
-        word: token.raw,
-        position: { start: token.start, end: token.end },
-        source,
-        type,
-        risk: getRisk(type),
-        norm: norm.norm,
-        normUrl: norm.url,
-        replacements: getReplacements(token.raw, glossaryMap),
-      });
-    }
+  const raw = collectPlainTextViolations(inputText, {
+    norms: norms.map((n) => ({ code: n.code, norm: n.norm, url: n.url })),
+    glossaryMap,
+    trademarks: trademarks.map((t) => ({ name: t.name })),
+    cyrillicLookup: lookup,
   });
-
-  const correctedText = applyPreferredReplacements(text, violations);
+  const filtered = filterViolationsByGlossaryAndTrademarks(raw, glossaryMap, trademarks.map((t) => ({ name: t.name })));
+  const violations: Violation[] = filtered.map((v) => ({
+    word: v.word,
+    position: v.position,
+    source,
+    type: v.type,
+    risk: v.risk,
+    norm: v.norm,
+    normUrl: v.normUrl,
+    replacements: v.replacements,
+  }));
+  const correctedText = applyPreferredReplacements(inputText, violations);
   return { violations, correctedText };
-}
-
-function tokenize(text: string): Token[] {
-  const regex = /[A-Za-zА-Яа-яЁё]+(?:-[A-Za-zА-Яа-яЁё]+)*/g;
-  const result: Token[] = [];
-  let match: RegExpExecArray | null = regex.exec(text);
-  while (match) {
-    const raw = match[0];
-    const start = match.index;
-    const end = start + raw.length;
-    result.push({ raw, normalized: raw.toLowerCase(), start, end });
-    match = regex.exec(text);
-  }
-  return result;
-}
-
-function matchPhrasesLongest(tokens: Token[], phrases: string[]): PhraseMatch[] {
-  const normalizedPhrases = phrases
-    .map((phrase) => phrase.trim().toLowerCase().split(/\s+/))
-    .filter((words) => words.length > 1)
-    .sort((a, b) => b.length - a.length);
-
-  const matches: PhraseMatch[] = [];
-  let i = 0;
-  while (i < tokens.length) {
-    let chosen: PhraseMatch | null = null;
-    for (const phraseWords of normalizedPhrases) {
-      const end = i + phraseWords.length - 1;
-      if (end >= tokens.length) continue;
-      let ok = true;
-      for (let k = 0; k < phraseWords.length; k += 1) {
-        if (tokens[i + k].normalized !== phraseWords[k]) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok) {
-        chosen = {
-          phrase: phraseWords.join(" "),
-          startTokenIdx: i,
-          endTokenIdx: end,
-          start: tokens[i].start,
-          end: tokens[end].end,
-        };
-        break;
-      }
-    }
-    if (chosen) {
-      matches.push(chosen);
-      i = chosen.endTokenIdx + 1;
-    } else {
-      i += 1;
-    }
-  }
-  return matches;
-}
-
-function isTrademarkPhrase(match: PhraseMatch, tokens: Token[], trademarks: TrademarkEntry[]): boolean {
-  const phrase = tokens
-    .slice(match.startTokenIdx, match.endTokenIdx + 1)
-    .map((token) => token.normalized)
-    .join(" ");
-  return trademarks.some((item) => item.name.toLowerCase() === phrase);
-}
-
-function isTrademarkToken(token: string, trademarks: TrademarkEntry[]): boolean {
-  return trademarks.some((entry) => {
-    const name = entry.name.toLowerCase();
-    if (name === token) return true;
-    if (token.includes("-")) return token.split("-").includes(name);
-    return false;
-  });
-}
-
-function isWordAllowed(word: string, dictionary: ParsedDictionary): boolean {
-  const lower = word.toLowerCase();
-  if (lower in dictionary.words) return true;
-  const stem = russianStem(lower);
-  return Boolean(dictionary.stems?.[stem]);
-}
-
-function isTechAbbreviation(value: string, techAbbrev: TechAbbrevData): boolean {
-  const lower = value.toLowerCase();
-  return techAbbrev.abbreviations.some((item) => item.toLowerCase() === lower);
-}
-
-function getRisk(type: ViolationType): "HIGH" | "MEDIUM" | "LOW" {
-  if (type === "LAT_PROHIBITED") return "HIGH";
-  if (type === "CYR_NOT_IN_DICT") return "MEDIUM";
-  return "LOW";
-}
-
-function getNorm(type: ViolationType, norms: NormEntry[]): { norm: string; url?: string } {
-  const item = norms.find((norm) => norm.code === type);
-  return item ? { norm: item.norm, url: item.url } : { norm: "Норма не указана" };
 }
 
 function buildGlossaryMap(entries: GlossaryEntry[]): Map<string, GlossaryEntry> {
   const map = new Map<string, GlossaryEntry>();
   entries.forEach((item) => map.set(item.original.toLowerCase(), item));
   return map;
-}
-
-function buildRulesContext(rules: RuleEntry[]): { denyGlossary: GlossaryEntry[]; allowTerms: string[] } {
-  const denyGlossary: GlossaryEntry[] = [];
-  const allowTerms: string[] = [];
-  rules.forEach((rule) => {
-    const phrase = rule.phrase.trim().toLowerCase();
-    if (!phrase) return;
-    if (rule.mode === "allow") {
-      allowTerms.push(phrase);
-      return;
-    }
-    const preferred = rule.replacements[0] ?? "";
-    const type: GlossaryEntry["type"] = /[a-z]/i.test(phrase) ? "LAT_PROHIBITED" : "CYR_NOT_IN_DICT";
-    denyGlossary.push({
-      original: phrase,
-      preferred,
-      replacements: rule.replacements,
-      type,
-    });
-  });
-  return { denyGlossary, allowTerms };
-}
-
-function getReplacements(value: string, glossaryMap: Map<string, GlossaryEntry>): string[] {
-  const entry = glossaryMap.get(value.toLowerCase());
-  if (!entry) return [];
-  const ordered = entry.preferred
-    ? [entry.preferred, ...entry.replacements.filter((x) => x.toLowerCase() !== entry.preferred.toLowerCase())]
-    : entry.replacements;
-  return ordered.slice(0, 3);
 }
 
 function applyPreferredReplacements(text: string, violations: Violation[]): string {
@@ -1192,9 +927,8 @@ function renderViolations() {
 
   const latViolations = state.combinedViolations.filter((item) => item.type === "LAT_PROHIBITED");
   const cyrViolations = state.combinedViolations.filter((item) => item.type === "CYR_NOT_IN_DICT");
-  const techViolations = state.combinedViolations.filter((item) => item.type === "TECH_ABBREV");
   const hasOcrIssues = state.ocrAssets.some((asset) => asset.status === "skipped" || asset.status === "ocr_failed");
-  if (!latViolations.length && !cyrViolations.length && !techViolations.length && !state.checkedWords.length && !hasOcrIssues) {
+  if (!latViolations.length && !cyrViolations.length && !state.checkedWords.length && !hasOcrIssues) {
     violationsList.innerHTML = "<li class=\"violation-card\">Нарушений не найдено.</li>";
     return;
   }
@@ -1202,7 +936,6 @@ function renderViolations() {
   const fragment = document.createDocumentFragment();
   appendViolationGroup(fragment, "lat", "Латиница", latViolations);
   appendViolationGroup(fragment, "cyr", "Не в словаре", cyrViolations);
-  appendViolationGroup(fragment, "tech", "Аббревиатуры", techViolations);
   appendOcrIssueRows(fragment);
   appendCheckedWordsGroup(fragment);
   violationsList.appendChild(fragment);
@@ -1210,7 +943,7 @@ function renderViolations() {
 
 function appendViolationGroup(
   fragment: DocumentFragment,
-  groupKey: "lat" | "cyr" | "tech",
+  groupKey: "lat" | "cyr",
   title: string,
   violations: Violation[],
 ) {
@@ -1245,7 +978,7 @@ function appendViolationGroup(
 
 function createViolationRow(violation: Violation): HTMLLIElement {
   const uiText = getViolationUiText(violation);
-  const typeClass = violation.type === "LAT_PROHIBITED" ? "lat" : violation.type === "CYR_NOT_IN_DICT" ? "cyr" : "tech";
+  const typeClass = violation.type === "LAT_PROHIBITED" ? "lat" : "cyr";
   const replacementText = violation.replacements.join(" / ") || "нет";
   const preferred = violation.replacements[0] ?? "";
   const hasReplacement = preferred.length > 0;
@@ -1355,12 +1088,8 @@ function updateCheckerSplitVisibility() {
 }
 
 function renderStatus() {
-  apiKeyNavDisplay.textContent = state.apiKey
-    ? `ключ: ••••${state.apiKey.slice(-4)}`
-    : "ключ не задан";
-  if (!state.apiKey) {
-    showStatus("warn", "Укажите API ключ ГосСловарь для запуска проверки.");
-    apiKeyDetails.classList.remove("hidden");
+  if (!state.dictionarySqlite) {
+    showStatus("warn", "Загрузка словаря SQLite…");
   } else {
     showStatus("ok", "✓ Сервис готов к проверке");
   }
@@ -1373,11 +1102,20 @@ function showStatus(level: "ok" | "warn" | "error", label: string) {
   statusDot.classList.remove("hidden");
 }
 
+function showNotice(level: "ok" | "warn" | "error", label: string) {
+  techHint.className = `hint ${level}`;
+  techHint.textContent = label;
+  techHint.classList.remove("hidden");
+}
+
+function clearNotice() {
+  techHint.classList.add("hidden");
+  techHint.textContent = "";
+  techHint.className = "hint hidden";
+}
+
 function getOverallStatus(violations: Violation[]): { level: "ok" | "warn" | "error"; label: string } {
   if (!violations.length) return { level: "ok", label: "✓ Нарушений не найдено" };
-  if (violations.every((item) => item.type === "TECH_ABBREV")) {
-    return { level: "warn", label: `⚠ Найдено ${violations.length} спорных аббревиатур` };
-  }
   return { level: "error", label: `✗ Найдено ${violations.length} нарушений` };
 }
 
@@ -1390,19 +1128,56 @@ function getViolationUiText(violation: Violation): ViolationUiText {
     };
   }
 
-  if (violation.type === "CYR_NOT_IN_DICT") {
-    return {
-      issueTitle: "Слово не найдено в нормативных словарях.",
-      legalSeverityLabel: "высокая",
-      confidenceLabel: "средняя",
-    };
-  }
-
   return {
-    issueTitle: "Техническая аббревиатура (спорная зона).",
-    legalSeverityLabel: "низкая",
+    issueTitle: "Слово не найдено в нормативных словарях.",
+    legalSeverityLabel: "высокая",
     confidenceLabel: "средняя",
   };
+}
+
+function syncRulesFormState() {
+  const mode: RuleEntry["mode"] = ruleModeInput.value === "deny" ? "deny" : "allow";
+  const isDeny = mode === "deny";
+  ruleReplacementsInput.disabled = !isDeny;
+  ruleReplacementsInput.placeholder = isDeny
+    ? "замены через запятую (для 'нельзя')"
+    : "замены не используются для режима 'можно'";
+  if (!isDeny) ruleReplacementsInput.value = "";
+}
+
+function saveRuleFromForm() {
+  const phrase = normalizeRulePhrase(rulePhraseInput.value);
+  if (!phrase) return;
+  const mode: RuleEntry["mode"] = ruleModeInput.value === "deny" ? "deny" : "allow";
+  const reason = ruleReasonInput.value.trim();
+  const replacements = mode === "deny"
+    ? ruleReplacementsInput.value
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)
+    : [];
+  const next: RuleEntry[] = [
+    ...state.rulesUser.filter((item) => item.phrase.toLowerCase() !== phrase),
+    { phrase, mode, reason, replacements },
+  ];
+  state.rulesUser = next;
+  saveRulesUser(localStorage, state.rulesUser);
+  rulePhraseInput.value = "";
+  ruleReasonInput.value = "";
+  ruleModeInput.value = "allow";
+  syncRulesFormState();
+  renderRulesRows();
+  showNotice("ok", "Правило сохранено.");
+}
+
+function removeRuleByPhrase(phrase: string) {
+  if (!phrase) return;
+  const before = state.rulesUser.length;
+  state.rulesUser = state.rulesUser.filter((item) => item.phrase !== phrase);
+  if (state.rulesUser.length === before) return;
+  saveRulesUser(localStorage, state.rulesUser);
+  renderRulesRows();
+  showNotice("ok", "Правило удалено.");
 }
 
 function renderRulesRows() {
@@ -1426,14 +1201,6 @@ function renderRulesRows() {
       <button data-remove-rule="${escapeHtml(item.phrase)}" class="btn-ghost btn-sm btn-danger-ghost" type="button">Удалить</button>
     `;
     rulesRows.appendChild(li);
-  });
-  rulesRows.querySelectorAll<HTMLButtonElement>("[data-remove-rule]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const key = button.dataset.removeRule ?? "";
-      state.rulesUser = state.rulesUser.filter((item) => item.phrase !== key);
-      saveStorage(USER_RULES_KEY, state.rulesUser);
-      renderRulesRows();
-    });
   });
 }
 
@@ -1470,7 +1237,7 @@ function renderHistoryRows() {
       emailInput.value = state.emailText;
       renderViolations();
       const status = getOverallStatus(state.combinedViolations);
-      showStatus(status.level, status.label);
+      showNotice(status.level, status.label);
       const emailViolations = state.combinedViolations.filter(
         (violation) => violation.source === "email_text",
       );
@@ -1583,13 +1350,34 @@ function loadHistoryEntries(): HistoryEntry[] {
   return raw.map(normalizeHistoryEntry);
 }
 
+function appendHistoryEntryFromJob(job: CheckJob) {
+  if (job.status !== "done") return;
+  const historyEntry: HistoryEntry = {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    emailText: job.html,
+    combinedViolations: (job.violations as Violation[]).map((violation) => ({ ...violation })),
+    correctedEmailText: "",
+  };
+  state.history = [historyEntry, ...state.history];
+  saveStorage(HISTORY_KEY, state.history);
+  renderHistoryRows();
+}
+
+function mapLegacyViolation(violation: Violation): Violation {
+  const t = violation.type as string;
+  if (t === "CYR_NOT_IN_DICT" || t === "LAT_PROHIBITED") return violation;
+  return { ...violation, type: "LAT_PROHIBITED", risk: "HIGH" };
+}
+
 function normalizeHistoryEntry(entry: LegacyHistoryEntry): HistoryEntry {
-  const normalizedViolations = (entry.combinedViolations ?? entry.result?.combinedViolations ?? []).map(
-    (violation, idx) => ({
-      ...violation,
-      id: violation.id ?? `history-${idx + 1}`,
-    }),
+  const raw = (entry.combinedViolations ?? entry.result?.combinedViolations ?? []).map((v) =>
+    mapLegacyViolation(v as Violation),
   );
+  const normalizedViolations = raw.map((violation, idx) => ({
+    ...violation,
+    id: violation.id ?? `history-${idx + 1}`,
+  }));
   return {
     id: entry.id ?? crypto.randomUUID(),
     createdAt: entry.createdAt ?? new Date().toISOString(),
@@ -1676,7 +1464,7 @@ function renderImageOcrOverlays(doc: Document): ImageOverlayHandle | null {
         violationId: violation.id ?? "",
         start: violation.position.start,
         end: violation.position.end,
-        kind: violation.type === "TECH_ABBREV" ? "tech" : "violation",
+        kind: "violation",
       })),
     }));
 
@@ -1697,24 +1485,13 @@ function buildOverlayRanges(
 ): OverlayRange[] {
   const kindByIndex: OverlayRange["kind"][] = Array.from({ length: textLength }, () => "ok");
   const idByIndex: Array<string | undefined> = Array.from({ length: textLength }, () => undefined);
-  let skippedNoId = 0;
   violations.forEach((violation) => {
     const violationId = violation.id;
-    if (!violationId) {
-      skippedNoId += 1;
-      return;
-    }
-    const kind: OverlayRange["kind"] = violation.type === "TECH_ABBREV" ? "tech" : "violation";
+    if (!violationId) return;
     const start = Math.max(0, violation.position.start);
     const end = Math.min(textLength, violation.position.end);
     for (let i = start; i < end; i += 1) {
-      if (kind === "violation") {
-        kindByIndex[i] = "violation";
-        idByIndex[i] = violationId;
-        continue;
-      }
-      if (kindByIndex[i] === "violation") continue;
-      kindByIndex[i] = "tech";
+      kindByIndex[i] = "violation";
       idByIndex[i] = violationId;
     }
   });
@@ -1752,14 +1529,6 @@ function highlightViolationCard(violationId: string) {
   violationsList.querySelectorAll<HTMLElement>(".violation-card").forEach((card) => {
     card.classList.toggle("active-preview", card.dataset.previewViolationId === violationId);
   });
-}
-
-function isCyrillicWord(value: string): boolean {
-  return /^[а-яё-]+$/i.test(value);
-}
-
-function isLatinWord(value: string): boolean {
-  return /^[a-z-]+$/i.test(value);
 }
 
 function escapeHtml(value: string): string {
@@ -1870,90 +1639,6 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-function parseCsv(content: string): Array<Record<string, string>> {
-  const lines = content.split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return [];
-  const headers = lines[0].split(",").map((item) => item.trim().replace(/^"|"$/g, ""));
-  return lines.slice(1).map((line) => {
-    const parts = line.split(",").map((item) => item.trim().replace(/^"|"$/g, ""));
-    const row: Record<string, string> = {};
-    headers.forEach((header, idx) => {
-      row[header] = parts[idx] ?? "";
-    });
-    return row;
-  });
-}
-
-function parseRulesCsv(content: string): RuleEntry[] {
-  const rows = parseCsv(content);
-  if (!rows.length) return [];
-  const hasNewFormat = "phrase" in rows[0] || "mode" in rows[0];
-  if (hasNewFormat) {
-    return rows
-      .map((row) => normalizeRuleEntry({
-        phrase: row.phrase ?? "",
-        mode: row.mode === "deny" ? "deny" : "allow",
-        reason: row.reason ?? "",
-        replacements: (row.replacements ?? "")
-          .split("|")
-          .map((x) => x.trim())
-          .filter(Boolean),
-      }))
-      .filter((item): item is RuleEntry => Boolean(item));
-  }
-  // legacy glossary CSV fallback
-  return rows
-    .map((row) => normalizeRuleEntry({
-      phrase: row.original ?? "",
-      mode: "deny",
-      reason: "",
-      replacements: (row.replacements ?? "")
-        .split("|")
-        .map((x) => x.trim())
-        .filter(Boolean),
-    }))
-    .filter((item): item is RuleEntry => Boolean(item));
-}
-
-function normalizeRuleEntry(value: Partial<RuleEntry>): RuleEntry | null {
-  const phrase = (value.phrase ?? "").trim().toLowerCase();
-  if (!phrase) return null;
-  const mode: RuleEntry["mode"] = value.mode === "deny" ? "deny" : "allow";
-  const reason = (value.reason ?? "").trim();
-  const replacements = mode === "deny" ? (value.replacements ?? []).slice(0, 5) : [];
-  return { phrase, mode, reason, replacements };
-}
-
-function loadRulesUser(): RuleEntry[] {
-  const stored = loadStorage<RuleEntry[] | null>(USER_RULES_KEY, null);
-  if (Array.isArray(stored) && stored.length) {
-    return stored
-      .map((item) => normalizeRuleEntry(item))
-      .filter((item): item is RuleEntry => Boolean(item));
-  }
-  const legacyGlossary = loadStorage<GlossaryEntry[]>(USER_GLOSSARY_KEY, []);
-  if (!legacyGlossary.length) return [];
-  return legacyGlossary
-    .map((item) => normalizeRuleEntry({
-      phrase: item.original,
-      mode: "deny",
-      reason: "",
-      replacements: item.replacements,
-    }))
-    .filter((item): item is RuleEntry => Boolean(item));
-}
-
-function toCsv(rows: Array<Record<string, string>>): string {
-  if (!rows.length) return "";
-  const headers = Object.keys(rows[0]);
-  const escape = (value: string) => `"${value.replace(/"/g, "\"\"")}"`;
-  const lines = [headers.join(",")];
-  rows.forEach((row) => {
-    lines.push(headers.map((header) => escape(row[header] ?? "")).join(","));
-  });
-  return lines.join("\n");
 }
 
 function downloadFile(filename: string, content: string, mimeType = "text/plain;charset=utf-8") {

@@ -13,8 +13,8 @@ export interface JobViolation {
   word: string;
   position: { start: number; end: number };
   source: "email_text";
-  type: "LAT_PROHIBITED" | "CYR_NOT_IN_DICT" | "TECH_ABBREV";
-  risk: "HIGH" | "MEDIUM" | "LOW";
+  type: "LAT_PROHIBITED" | "CYR_NOT_IN_DICT";
+  risk: "HIGH" | "MEDIUM";
   norm: string;
   normUrl?: string;
   replacements: string[];

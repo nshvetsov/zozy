@@ -4,6 +4,10 @@ const base = process.env.BASE_PATH ?? "/";
 
 export default defineConfig({
   base,
+  assetsInclude: ["**/*.wasm"],
+  optimizeDeps: {
+    exclude: ["sql.js"],
+  },
   plugins: [
     {
       name: "local-source-html-proxy",
