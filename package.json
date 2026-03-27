@@ -4,9 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "predev": "node scripts/sync-data-to-public.mjs",
+    "predev": "node scripts/build-lookup-manifest.mjs && node scripts/sync-data-to-public.mjs",
     "dev": "vite",
-    "prebuild": "node scripts/sync-data-to-public.mjs",
+    "prebuild": "node scripts/build-lookup-manifest.mjs && node scripts/sync-data-to-public.mjs",
     "build": "tsc && vite build && node scripts/copy-data-to-dist.mjs",
     "preview": "vite preview",
     "test": "vitest run"
@@ -15,9 +15,9 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^25.5.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@types/sql.js": "^1.4.11",
     "@vitejs/plugin-react": "^6.0.1",
     "jsdom": "^29.0.0",
     "typescript": "~5.9.3",

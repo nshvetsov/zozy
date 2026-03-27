@@ -17,7 +17,7 @@ describe("mapViolationRangesToWordBoxes", () => {
     const words = [
       { text: "drive", start: 0, end: 5, confidence: 90, bbox: { x0: 10, y0: 10, x1: 60, y1: 28 } },
     ];
-    const ranges = [{ violationId: "v2", start: 10, end: 12, kind: "violation" as const }];
+    const ranges = [{ violationId: "v2", start: 10, end: 12, kind: "tech" as const }];
     const boxes = mapViolationRangesToWordBoxes(words, ranges);
     expect(boxes).toHaveLength(0);
   });

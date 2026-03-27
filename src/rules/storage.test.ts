@@ -29,12 +29,12 @@ describe("rules/storage", () => {
   it("loads rules from user_rules storage key", () => {
     const storage = createStorage({
       [USER_RULES_KEY]: JSON.stringify([
-        { phrase: "VR", mode: "deny", reason: "x", replacements: ["виртуальная реальность"] },
+        { phrase: "VR", mode: "deny", reason: "x", applyToInflections: true, replacements: ["виртуальная реальность"] },
       ]),
     });
     const loaded = loadRulesUser(storage);
     expect(loaded).toEqual([
-      { phrase: "vr", mode: "deny", reason: "x", replacements: ["виртуальная реальность"] },
+      { phrase: "vr", mode: "deny", reason: "x", applyToInflections: true, replacements: ["виртуальная реальность"] },
     ]);
   });
 
@@ -46,15 +46,15 @@ describe("rules/storage", () => {
     });
     const loaded = loadRulesUser(storage);
     expect(loaded).toEqual([
-      { phrase: "vr", mode: "deny", reason: "", replacements: ["виртуальная реальность"] },
+      { phrase: "vr", mode: "deny", reason: "", applyToInflections: false, replacements: ["виртуальная реальность"] },
     ]);
   });
 
   it("saves normalized list to user_rules", () => {
     const storage = createStorage();
-    saveRulesUser(storage, [{ phrase: "vr", mode: "deny", reason: "", replacements: ["виртуальная реальность"] }]);
+    saveRulesUser(storage, [{ phrase: "vr", mode: "deny", reason: "", applyToInflections: true, replacements: ["виртуальная реальность"] }]);
     expect(JSON.parse(storage.getItem(USER_RULES_KEY) ?? "[]")).toEqual([
-      { phrase: "vr", mode: "deny", reason: "", replacements: ["виртуальная реальность"] },
+      { phrase: "vr", mode: "deny", reason: "", applyToInflections: true, replacements: ["виртуальная реальность"] },
     ]);
   });
 });

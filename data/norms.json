@@ -1,4 +1,5 @@
 [
   {"code":"LAT_PROHIBITED","norm":"Ч. 2 ст. 10.1 ЗоЗПП; ч. 6 ст. 3 ФЗ-53","url":"https://www.consultant.ru/document/cons_doc_LAW_305/"},
-  {"code":"CYR_NOT_IN_DICT","norm":"Ч. 6 ст. 3 ФЗ-53; Распоряжение № 1102-р","url":"https://www.consultant.ru/document/cons_doc_LAW_363/"}
+  {"code":"CYR_NOT_IN_DICT","norm":"Ч. 6 ст. 3 ФЗ-53; Распоряжение № 1102-р","url":"https://www.consultant.ru/document/cons_doc_LAW_363/"},
+  {"code":"TECH_ABBREV","norm":"П. 4 ст. 10.1 ЗоЗПП (косвенно)","url":"https://www.consultant.ru/document/cons_doc_LAW_305/"}
 ]

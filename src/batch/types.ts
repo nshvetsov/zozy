@@ -13,11 +13,13 @@ export interface JobViolation {
   word: string;
   position: { start: number; end: number };
   source: "email_text";
-  type: "LAT_PROHIBITED" | "CYR_NOT_IN_DICT";
-  risk: "HIGH" | "MEDIUM";
+  type: "LAT_PROHIBITED" | "CYR_NOT_IN_DICT" | "TECH_ABBREV";
+  risk: "HIGH" | "MEDIUM" | "LOW";
   norm: string;
   normUrl?: string;
   replacements: string[];
+  explanation?: string;
+  uncertain?: boolean;
 }
 
 export interface JobCheckedWord {
@@ -26,6 +28,9 @@ export interface JobCheckedWord {
   normalized: string;
   start: number;
   end: number;
+  statusLabel?: string;
+  details?: string;
+  uncertain?: boolean;
 }
 
 export interface CheckJob {

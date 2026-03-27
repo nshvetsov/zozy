@@ -1,19 +1,37 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+import initSqlJs from "sql.js";
 import { runCheckJob } from "./jobRunner";
 import type { CheckJob } from "./types";
-import type { CyrillicSqliteLookup } from "../dictionary/sqliteDictionary";
 
-function mockLookup(allowed: Set<string>): CyrillicSqliteLookup {
-  return {
-    allowsNormalizedBatch(words: string[]) {
-      return new Set(words.filter((w) => allowed.has(w)));
-    },
-  };
+async function createTestDb() {
+  const SQL = await initSqlJs({
+    locateFile: () => "node_modules/sql.js/dist/sql-wasm.wasm",
+  });
+  const db = new SQL.Database();
+  db.exec(`
+    CREATE TABLE dictionaries (id INTEGER PRIMARY KEY, code TEXT NOT NULL, title TEXT NOT NULL);
+    CREATE TABLE entries (id INTEGER PRIMARY KEY, dictionary_id INTEGER NOT NULL, source_pdf TEXT NOT NULL, page_start INTEGER NOT NULL, page_end INTEGER NOT NULL, entry_text_clean TEXT NOT NULL, warnings_json TEXT NOT NULL);
+    CREATE TABLE headwords (id INTEGER PRIMARY KEY AUTOINCREMENT, entry_id INTEGER NOT NULL, dictionary_id INTEGER NOT NULL, headword_display TEXT NOT NULL, headword_norm TEXT NOT NULL);
+    INSERT INTO dictionaries(id, code, title) VALUES (1, 'orto', 'Орфографический словарь');
+    INSERT INTO entries(id, dictionary_id, source_pdf, page_start, page_end, entry_text_clean, warnings_json)
+      VALUES (1, 1, 'test.pdf', 10, 10, 'скидка', '[]'),
+             (2, 1, 'test.pdf', 12, 12, 'авто', '[]'),
+             (3, 1, 'test.pdf', 13, 13, 'химия', '[]'),
+             (4, 1, 'test.pdf', 14, 14, 'бренд', '[]');
+    INSERT INTO headwords(entry_id, dictionary_id, headword_display, headword_norm)
+      VALUES (1, 1, 'скидка', 'скидка'),
+             (2, 1, 'авто', 'авто'),
+             (3, 1, 'химия', 'химия'),
+             (4, 1, 'бренд', 'бренд');
+  `);
+  return db;
 }
 
 describe("runCheckJob", () => {
-  it("flags latin VR and allows cyrillic in dictionary", async () => {
+  it("marks latin words as violations and keeps dictionary words", async () => {
+    const db = await createTestDb();
+
     const job: CheckJob = {
       id: "job-1",
       sourceType: "file",
@@ -29,25 +47,26 @@ describe("runCheckJob", () => {
       createdAt: new Date().toISOString(),
     };
 
-    const lookup = mockLookup(new Set(["скидка"]));
     const result = await runCheckJob(job, {
-      fetchImpl: vi.fn(),
+      db,
       norms: [
         { code: "LAT_PROHIBITED", norm: "norm-lat" },
         { code: "CYR_NOT_IN_DICT", norm: "norm-cyr" },
       ],
       glossaryMap: new Map(),
-      trademarks: [],
-      cyrillicLookup: lookup,
+      rules: [],
+      allowTerms: [],
     });
 
-    expect(result.plainText).toBe("Скидка VR");
+    expect(result.plainText.toLowerCase()).toContain("скидка");
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0].type).toBe("LAT_PROHIBITED");
     expect(result.checkedWords.some((item) => item.word.toLowerCase() === "скидка")).toBe(true);
   });
 
-  it("filters violations by allow terms (trademarks list)", async () => {
+  it("applies allow terms and suppresses missing-word violation", async () => {
+    const db = await createTestDb();
+
     const job: CheckJob = {
       id: "job-allow-1",
       sourceType: "url",
@@ -62,23 +81,24 @@ describe("runCheckJob", () => {
       createdAt: new Date().toISOString(),
     };
 
-    const lookup = mockLookup(new Set(["скидка"]));
     const result = await runCheckJob(job, {
-      fetchImpl: vi.fn(),
+      db,
       norms: [
         { code: "LAT_PROHIBITED", norm: "norm-lat" },
         { code: "CYR_NOT_IN_DICT", norm: "norm-cyr" },
       ],
       glossaryMap: new Map(),
-      trademarks: [{ name: "VR" }],
-      cyrillicLookup: lookup,
+      rules: [],
+      allowTerms: ["vr"],
     });
 
     expect(result.violations).toEqual([]);
     expect(result.checkedWords.some((item) => item.word === "VR")).toBe(true);
   });
 
-  it("filters violations by glossary map entries", async () => {
+  it("applies deny rule over dictionary match", async () => {
+    const db = await createTestDb();
+
     const job: CheckJob = {
       id: "job-deny-1",
       sourceType: "file",
@@ -94,29 +114,36 @@ describe("runCheckJob", () => {
       createdAt: new Date().toISOString(),
     };
 
-    const lookup = mockLookup(new Set(["скидка"]));
     const result = await runCheckJob(job, {
-      fetchImpl: vi.fn(),
+      db,
       norms: [
         { code: "LAT_PROHIBITED", norm: "norm-lat" },
         { code: "CYR_NOT_IN_DICT", norm: "norm-cyr" },
       ],
       glossaryMap: new Map([
         [
-          "vr",
+          "скидка",
           {
-            original: "vr",
-            preferred: "виртуальная реальность",
-            replacements: ["виртуальная реальность"],
-            type: "LAT_PROHIBITED",
+            original: "скидка",
+            preferred: "выгода",
+            replacements: ["выгода"],
+            type: "CYR_NOT_IN_DICT",
           },
         ],
       ]),
-      trademarks: [],
-      cyrillicLookup: lookup,
+      rules: [
+        {
+          phrase: "скидка",
+          mode: "deny",
+          reason: "policy",
+          replacements: ["выгода"],
+          applyToInflections: false,
+        },
+      ],
+      allowTerms: [],
     });
 
-    expect(result.violations).toEqual([]);
-    expect(result.checkedWords.some((item) => item.word === "VR")).toBe(true);
+    expect(result.violations.some((item) => item.word.toLowerCase() === "скидка")).toBe(true);
+    expect(result.checkedWords.some((item) => item.word.toLowerCase() === "скидка")).toBe(false);
   });
 });

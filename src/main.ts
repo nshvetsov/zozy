@@ -1,12 +1,10 @@
 import "./style.css";
-import { collectPlainTextViolations, filterViolationsByGlossaryAndTrademarks } from "./check/textCheck";
 import { buildHtmlPreviewModel } from "./htmlPreview";
 import { recognizeImageText, type BrowserOcrResult } from "./browserOcr";
 import { extractHtmlImages, type HtmlImageAsset } from "./htmlImages";
 import { buildViolationsCsvUtf8Sig } from "./batch/exportViolationsCsv";
 import { runCheckJob } from "./batch/jobRunner";
 import type { CheckJob } from "./batch/types";
-import { createDictionaryFromBuffer, type DictionarySqlite } from "./dictionary/openLookupDb";
 import {
   renderImageOverlays,
   type ImageOverlayAsset,
@@ -14,11 +12,15 @@ import {
   type ImageViolationRange,
 } from "./imageOverlay";
 import { renderPreviewWithOverlay, type OverlayRange, type PreviewRenderHandle } from "./previewOverlay";
+import { russianStem } from "./russianStem";
 import { buildRulesCsv, parseRulesCsv } from "./rules/csv";
 import { buildRulesContext, normalizeRulePhrase, type RuleEntry } from "./rules/domain";
 import { loadRulesUser, saveRulesUser } from "./rules/storage";
+import { verifyWord } from "./sqlite/engine";
+import { ensureLookupDb, getLookupDbVersion, type LookupProgress } from "./sqlite/runtime";
+import type { Database } from "sql.js";
 
-type ViolationType = "LAT_PROHIBITED" | "CYR_NOT_IN_DICT";
+type ViolationType = "LAT_PROHIBITED" | "CYR_NOT_IN_DICT" | "TECH_ABBREV";
 type SourceType = "email_text" | "image_text";
 
 interface GlossaryEntry {
@@ -41,6 +43,30 @@ interface NormEntry {
   url: string;
 }
 
+interface ParsedDictionary {
+  words: Record<string, string[]>;
+  stems?: Record<string, boolean>;
+}
+
+interface TechAbbrevData {
+  abbreviations: string[];
+}
+
+interface Token {
+  raw: string;
+  normalized: string;
+  start: number;
+  end: number;
+}
+
+interface PhraseMatch {
+  phrase: string;
+  startTokenIdx: number;
+  endTokenIdx: number;
+  start: number;
+  end: number;
+}
+
 interface Violation {
   id?: string;
   word: string;
@@ -49,10 +75,12 @@ interface Violation {
   sourceDetails?: string;
   imageAssetId?: string;
   type: ViolationType;
-  risk: "HIGH" | "MEDIUM";
+  risk: "HIGH" | "MEDIUM" | "LOW";
   norm: string;
   normUrl?: string;
   replacements: string[];
+  explanation?: string;
+  uncertain?: boolean;
 }
 
 interface OcrImageAssetState extends HtmlImageAsset {
@@ -70,6 +98,9 @@ interface CheckedWord {
   normalized: string;
   start: number;
   end: number;
+  statusLabel?: string;
+  details?: string;
+  uncertain?: boolean;
 }
 
 interface ViolationUiText {
@@ -114,12 +145,18 @@ if (!rootCandidate) throw new Error("Root element #app not found");
 const root: HTMLDivElement = rootCandidate;
 
 const state = {
-  dictionarySqlite: null as DictionarySqlite | null,
+  dictionary: null as ParsedDictionary | null,
+  techAbbrev: null as TechAbbrevData | null,
   glossaryBuiltIn: [] as GlossaryEntry[],
   rulesUser: loadRulesUser(localStorage),
   trademarksBuiltIn: [] as TrademarkEntry[],
   norms: [] as NormEntry[],
   history: loadHistoryEntries(),
+  lookupDb: null as Database | null,
+  lookupDbReady: false,
+  lookupDbVersion: "",
+  lookupDbLoading: false,
+  lookupDbProgressLabel: "",
   jobs: [] as CheckJob[],
   selectedJobId: null as string | null,
   emailText: "",
@@ -144,6 +181,16 @@ root.innerHTML = `
       <div class="nav-right">
         <div class="nav-utilities">
           <span id="statusDot" class="status-dot hidden" aria-label="Статус сервиса"></span>
+          <div class="nav-api-key">
+            <span id="apiKeyNavDisplay"></span>
+            <button id="apiKeyNavEditBtn" type="button" class="btn-ghost icon-btn" aria-label="Обновить словарную базу">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 20h4l10.4-10.4-4-4L4 16v4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                <path d="M12.9 6.6l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <div id="apiKeyDetails" class="api-key-popup hidden"></div>
+          </div>
         </div>
         <div class="nav-menu">
           <button data-tab-btn="rules" type="button">Правила</button>
@@ -185,6 +232,13 @@ root.innerHTML = `
       <div id="checkProgress" class="check-progress hidden">
         <div id="checkProgressBar" class="check-progress-bar"></div>
       </div>
+      <div class="single-word-checker">
+        <div class="single-word-row">
+          <input id="singleWordInput" placeholder="Проверка одного слова" />
+          <button id="runSingleWordBtn" type="button" class="btn-sm">Проверить слово</button>
+        </div>
+        <div id="singleWordResult" class="hint hidden"></div>
+      </div>
       <section id="queueSection" class="queue-section hidden">
         <ul id="jobsList" class="list violations-list"></ul>
       </section>
@@ -214,6 +268,10 @@ root.innerHTML = `
         </select>
         <input id="ruleReason" placeholder="причина" />
         <input id="ruleReplacements" placeholder="замены через запятую (для 'нельзя')" />
+        <label class="rules-inflection-toggle">
+          <input id="ruleApplyToInflections" type="checkbox" />
+          учитывать словоформы (через лемму)
+        </label>
         <button id="addRuleBtn" class="btn-sm">Сохранить</button>
       </div>
       <div class="secondary-toolbar">
@@ -242,6 +300,8 @@ root.innerHTML = `
   </main>
 `;
 
+const apiKeyNavDisplay = queryEl<HTMLSpanElement>("#apiKeyNavDisplay");
+const apiKeyNavEditBtn = queryEl<HTMLButtonElement>("#apiKeyNavEditBtn");
 const urlListInput = queryEl<HTMLTextAreaElement>("#urlListInput");
 const emailInput = queryEl<HTMLTextAreaElement>("#emailText");
 const manualHtmlToggleBtn = queryEl<HTMLButtonElement>("#manualHtmlToggleBtn");
@@ -257,6 +317,9 @@ const runImageOcrBtn = queryEl<HTMLButtonElement>("#runImageOcrBtn");
 const statusDot = queryEl<HTMLSpanElement>("#statusDot");
 const checkProgress = queryEl<HTMLDivElement>("#checkProgress");
 const checkProgressBar = queryEl<HTMLDivElement>("#checkProgressBar");
+const singleWordInput = queryEl<HTMLInputElement>("#singleWordInput");
+const runSingleWordBtn = queryEl<HTMLButtonElement>("#runSingleWordBtn");
+const singleWordResult = queryEl<HTMLDivElement>("#singleWordResult");
 const ocrStatus = queryEl<HTMLDivElement>("#ocrStatus");
 const techHint = queryEl<HTMLDivElement>("#techHint");
 const violationsList = queryEl<HTMLUListElement>("#violationsList");
@@ -272,6 +335,7 @@ const rulePhraseInput = queryEl<HTMLInputElement>("#rulePhrase");
 const ruleModeInput = queryEl<HTMLSelectElement>("#ruleMode");
 const ruleReasonInput = queryEl<HTMLInputElement>("#ruleReason");
 const ruleReplacementsInput = queryEl<HTMLInputElement>("#ruleReplacements");
+const ruleApplyToInflectionsInput = queryEl<HTMLInputElement>("#ruleApplyToInflections");
 const addRuleBtn = queryEl<HTMLButtonElement>("#addRuleBtn");
 const rulesRows = queryEl<HTMLUListElement>("#rulesRows");
 const rulesCount = queryEl<HTMLSpanElement>("#rulesCount");
@@ -294,7 +358,7 @@ void init();
 window.addEventListener("resize", syncViolationsHeightWithPreview);
 
 function setCheckControls(inProgress: boolean) {
-  runCheckBtn.disabled = inProgress;
+  runCheckBtn.disabled = inProgress || state.lookupDbLoading || !state.lookupDbReady;
   runCheckBtn.textContent = inProgress ? RUN_CHECK_BUSY_LABEL : RUN_CHECK_DEFAULT_LABEL;
   updateExportButtonState(inProgress);
   stopCheckBtn.classList.toggle("hidden", !inProgress);
@@ -308,31 +372,25 @@ function updateExportButtonState(inProgress: boolean) {
 
 async function init() {
   try {
-    const base = import.meta.env.BASE_URL.replace(/\/?$/, "/");
-    const sqliteUrl = `${base}data/lookup.sqlite`;
-    const [glossary, trademarks, norms, sqliteBuf] = await Promise.all([
+    const [glossary, trademarks, norms] = await Promise.all([
       fetchJson<GlossaryEntry[]>("data/glossary.json"),
       fetchJson<TrademarkEntry[]>("data/trademarks.json"),
       fetchJson<NormEntry[]>("data/norms.json"),
-      fetch(sqliteUrl).then((r) => {
-        if (!r.ok) throw new Error(`lookup.sqlite: ${r.status}`);
-        return r.arrayBuffer();
-      }),
     ]);
 
     state.glossaryBuiltIn = glossary;
     state.trademarksBuiltIn = trademarks;
     state.norms = norms;
-    state.dictionarySqlite = await createDictionaryFromBuffer(sqliteBuf);
     renderStatus();
     renderRulesRows();
     renderHistoryRows();
     renderJobsList();
+    await prepareLookupDb();
   } catch (error) {
     console.error("Init failed:", error);
     showStatus(
       "error",
-      "✗ Не удалось загрузить данные или словарь SQLite. Обновите страницу или проверьте data/* и lookup.sqlite",
+      "✗ Не удалось загрузить данные. Обновите страницу или проверьте публикацию data/*.json",
     );
   }
 }
@@ -344,6 +402,9 @@ function attachEvents() {
     });
   });
 
+  apiKeyNavEditBtn.addEventListener("click", () => {
+    void prepareLookupDb({ forceRefresh: true });
+  });
   manualHtmlToggleBtn.addEventListener("click", () => {
     manualHtmlArea.classList.toggle("hidden");
     manualHtmlToggleBtn.textContent = manualHtmlArea.classList.contains("hidden")
@@ -376,6 +437,15 @@ function attachEvents() {
 
   runCheckBtn.addEventListener("click", () => {
     void runCheck();
+  });
+  runSingleWordBtn.addEventListener("click", () => {
+    void runSingleWordCheck();
+  });
+  singleWordInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void runSingleWordCheck();
+    }
   });
   stopCheckBtn.addEventListener("click", () => {
     activeCheckController?.abort();
@@ -630,8 +700,9 @@ async function selectJob(jobId: string) {
 
 async function runCheck() {
   if (state.isChecking) return;
-  if (!state.dictionarySqlite) {
-    showNotice("error", "✗ Словарь ещё не загружен. Дождитесь индикатора готовности или обновите страницу.");
+  if (!state.lookupDbReady || !state.lookupDb) {
+    showNotice("warn", "Словарная база ещё не готова. Дождитесь загрузки или обновите базу.");
+    void prepareLookupDb();
     return;
   }
   await enqueueSources({ includeUrls: true, warnIfEmpty: false });
@@ -676,11 +747,12 @@ async function runCheck() {
       }
       try {
         const result = await runCheckJob(job, {
+          db: state.lookupDb,
           urlProxyEndpoint: URL_SOURCE_PROXY_ENDPOINT,
           norms: state.norms.map((norm) => ({ code: norm.code, norm: norm.norm, url: norm.url })),
           glossaryMap,
-          trademarks: allowedTerms.map((item) => ({ name: item })),
-          cyrillicLookup: state.dictionarySqlite,
+          rules: state.rulesUser,
+          allowTerms: allowedTerms.map((item) => item.toLowerCase()),
           signal: controller.signal,
           onProgress: (label) => {
             job.status = "checking";
@@ -741,9 +813,15 @@ async function runCheck() {
   }
 }
 
+function explainApiError(error: unknown): string {
+  const message = (error as Error)?.message ?? "";
+  if (message.includes("Failed to fetch")) return "не удалось обратиться к локальным данным (возможна сеть/CORS).";
+  return message || "неизвестная ошибка проверки.";
+}
+
 function explainJobError(error: unknown, job: CheckJob): string {
   const message = (error as Error)?.message ?? "";
-  let mapped = message || "неизвестная ошибка.";
+  let mapped = explainApiError(error);
   if (job.sourceType === "url" && message.includes("URL_SOURCE_PROXY_FAILED")) {
     mapped =
       "не удалось загрузить HTML по URL через Yandex Cloud Function proxy (проверьте endpoint, CORS и доступность источника).";
@@ -762,7 +840,7 @@ function explainJobError(error: unknown, job: CheckJob): string {
 }
 
 async function runImageOcr() {
-  if (!state.dictionarySqlite) return;
+  if (!state.dictionary || !state.techAbbrev) return;
   if (!isHtmlLike(state.emailText)) {
     showOcrStatus("Вставьте HTML письма с изображениями, чтобы запустить OCR.", true);
     return;
@@ -812,7 +890,8 @@ async function runImageOcr() {
       const checkResult = checkSingleText(
         result.text,
         "image_text",
-        state.dictionarySqlite,
+        state.dictionary,
+        state.techAbbrev,
         state.norms,
         glossaryMap,
         allowedTerms.map((item) => ({ name: item, type: "trademark" as const })),
@@ -849,36 +928,193 @@ async function runImageOcr() {
 function checkSingleText(
   inputText: string,
   source: SourceType,
-  lookup: DictionarySqlite,
+  dictionary: ParsedDictionary,
+  techAbbrev: TechAbbrevData,
   norms: NormEntry[],
   glossaryMap: Map<string, GlossaryEntry>,
   trademarks: TrademarkEntry[],
 ): CheckResult {
-  const raw = collectPlainTextViolations(inputText, {
-    norms: norms.map((n) => ({ code: n.code, norm: n.norm, url: n.url })),
-    glossaryMap,
-    trademarks: trademarks.map((t) => ({ name: t.name })),
-    cyrillicLookup: lookup,
+  const text = inputText;
+  const tokens = tokenize(text);
+  const phrasePool = [
+    ...Array.from(glossaryMap.keys()).filter((phrase) => phrase.includes(" ")),
+    ...trademarks.map((item) => item.name.toLowerCase()).filter((name) => name.includes(" ")),
+  ];
+  const phraseMatches = matchPhrasesLongest(tokens, phrasePool);
+  const consumedIndexes = new Set<number>();
+  const violations: Violation[] = [];
+
+  for (const match of phraseMatches) {
+    for (let i = match.startTokenIdx; i <= match.endTokenIdx; i += 1) consumedIndexes.add(i);
+    const phraseText = text.slice(match.start, match.end);
+    if (isTrademarkPhrase(match, tokens, trademarks)) continue;
+    const normType = "LAT_PROHIBITED";
+    const isTech = isTechAbbreviation(phraseText, techAbbrev);
+    const type: ViolationType = isTech ? "TECH_ABBREV" : normType;
+    const norm = getNorm(type, norms);
+    violations.push({
+      word: phraseText,
+      position: { start: match.start, end: match.end },
+      source,
+      type,
+      risk: getRisk(type),
+      norm: norm.norm,
+      normUrl: norm.url,
+      replacements: getReplacements(phraseText, glossaryMap),
+    });
+  }
+
+  tokens.forEach((token, idx) => {
+    if (consumedIndexes.has(idx)) return;
+    if (isTrademarkToken(token.normalized, trademarks)) return;
+
+    if (isCyrillicWord(token.normalized)) {
+      if (!isWordAllowed(token.normalized, dictionary)) {
+        const norm = getNorm("CYR_NOT_IN_DICT", norms);
+        violations.push({
+          word: token.raw,
+          position: { start: token.start, end: token.end },
+          source,
+          type: "CYR_NOT_IN_DICT",
+          risk: "MEDIUM",
+          norm: norm.norm,
+          normUrl: norm.url,
+          replacements: getReplacements(token.raw, glossaryMap),
+        });
+      }
+      return;
+    }
+
+    if (isLatinWord(token.normalized)) {
+      const type: ViolationType = isTechAbbreviation(token.raw, techAbbrev)
+        ? "TECH_ABBREV"
+        : "LAT_PROHIBITED";
+      const norm = getNorm(type, norms);
+      violations.push({
+        word: token.raw,
+        position: { start: token.start, end: token.end },
+        source,
+        type,
+        risk: getRisk(type),
+        norm: norm.norm,
+        normUrl: norm.url,
+        replacements: getReplacements(token.raw, glossaryMap),
+      });
+    }
   });
-  const filtered = filterViolationsByGlossaryAndTrademarks(raw, glossaryMap, trademarks.map((t) => ({ name: t.name })));
-  const violations: Violation[] = filtered.map((v) => ({
-    word: v.word,
-    position: v.position,
-    source,
-    type: v.type,
-    risk: v.risk,
-    norm: v.norm,
-    normUrl: v.normUrl,
-    replacements: v.replacements,
-  }));
-  const correctedText = applyPreferredReplacements(inputText, violations);
+
+  const correctedText = applyPreferredReplacements(text, violations);
   return { violations, correctedText };
+}
+
+function tokenize(text: string): Token[] {
+  const regex = /[A-Za-zА-Яа-яЁё]+(?:-[A-Za-zА-Яа-яЁё]+)*/g;
+  const result: Token[] = [];
+  let match: RegExpExecArray | null = regex.exec(text);
+  while (match) {
+    const raw = match[0];
+    const start = match.index;
+    const end = start + raw.length;
+    result.push({ raw, normalized: raw.toLowerCase(), start, end });
+    match = regex.exec(text);
+  }
+  return result;
+}
+
+function matchPhrasesLongest(tokens: Token[], phrases: string[]): PhraseMatch[] {
+  const normalizedPhrases = phrases
+    .map((phrase) => phrase.trim().toLowerCase().split(/\s+/))
+    .filter((words) => words.length > 1)
+    .sort((a, b) => b.length - a.length);
+
+  const matches: PhraseMatch[] = [];
+  let i = 0;
+  while (i < tokens.length) {
+    let chosen: PhraseMatch | null = null;
+    for (const phraseWords of normalizedPhrases) {
+      const end = i + phraseWords.length - 1;
+      if (end >= tokens.length) continue;
+      let ok = true;
+      for (let k = 0; k < phraseWords.length; k += 1) {
+        if (tokens[i + k].normalized !== phraseWords[k]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        chosen = {
+          phrase: phraseWords.join(" "),
+          startTokenIdx: i,
+          endTokenIdx: end,
+          start: tokens[i].start,
+          end: tokens[end].end,
+        };
+        break;
+      }
+    }
+    if (chosen) {
+      matches.push(chosen);
+      i = chosen.endTokenIdx + 1;
+    } else {
+      i += 1;
+    }
+  }
+  return matches;
+}
+
+function isTrademarkPhrase(match: PhraseMatch, tokens: Token[], trademarks: TrademarkEntry[]): boolean {
+  const phrase = tokens
+    .slice(match.startTokenIdx, match.endTokenIdx + 1)
+    .map((token) => token.normalized)
+    .join(" ");
+  return trademarks.some((item) => item.name.toLowerCase() === phrase);
+}
+
+function isTrademarkToken(token: string, trademarks: TrademarkEntry[]): boolean {
+  return trademarks.some((entry) => {
+    const name = entry.name.toLowerCase();
+    if (name === token) return true;
+    if (token.includes("-")) return token.split("-").includes(name);
+    return false;
+  });
+}
+
+function isWordAllowed(word: string, dictionary: ParsedDictionary): boolean {
+  const lower = word.toLowerCase();
+  if (lower in dictionary.words) return true;
+  const stem = russianStem(lower);
+  return Boolean(dictionary.stems?.[stem]);
+}
+
+function isTechAbbreviation(value: string, techAbbrev: TechAbbrevData): boolean {
+  const lower = value.toLowerCase();
+  return techAbbrev.abbreviations.some((item) => item.toLowerCase() === lower);
+}
+
+function getRisk(type: ViolationType): "HIGH" | "MEDIUM" | "LOW" {
+  if (type === "LAT_PROHIBITED") return "HIGH";
+  if (type === "CYR_NOT_IN_DICT") return "MEDIUM";
+  return "LOW";
+}
+
+function getNorm(type: ViolationType, norms: NormEntry[]): { norm: string; url?: string } {
+  const item = norms.find((norm) => norm.code === type);
+  return item ? { norm: item.norm, url: item.url } : { norm: "Норма не указана" };
 }
 
 function buildGlossaryMap(entries: GlossaryEntry[]): Map<string, GlossaryEntry> {
   const map = new Map<string, GlossaryEntry>();
   entries.forEach((item) => map.set(item.original.toLowerCase(), item));
   return map;
+}
+
+function getReplacements(value: string, glossaryMap: Map<string, GlossaryEntry>): string[] {
+  const entry = glossaryMap.get(value.toLowerCase());
+  if (!entry) return [];
+  const ordered = entry.preferred
+    ? [entry.preferred, ...entry.replacements.filter((x) => x.toLowerCase() !== entry.preferred.toLowerCase())]
+    : entry.replacements;
+  return ordered.slice(0, 3);
 }
 
 function applyPreferredReplacements(text: string, violations: Violation[]): string {
@@ -927,8 +1163,9 @@ function renderViolations() {
 
   const latViolations = state.combinedViolations.filter((item) => item.type === "LAT_PROHIBITED");
   const cyrViolations = state.combinedViolations.filter((item) => item.type === "CYR_NOT_IN_DICT");
+  const techViolations = state.combinedViolations.filter((item) => item.type === "TECH_ABBREV");
   const hasOcrIssues = state.ocrAssets.some((asset) => asset.status === "skipped" || asset.status === "ocr_failed");
-  if (!latViolations.length && !cyrViolations.length && !state.checkedWords.length && !hasOcrIssues) {
+  if (!latViolations.length && !cyrViolations.length && !techViolations.length && !state.checkedWords.length && !hasOcrIssues) {
     violationsList.innerHTML = "<li class=\"violation-card\">Нарушений не найдено.</li>";
     return;
   }
@@ -936,6 +1173,7 @@ function renderViolations() {
   const fragment = document.createDocumentFragment();
   appendViolationGroup(fragment, "lat", "Латиница", latViolations);
   appendViolationGroup(fragment, "cyr", "Не в словаре", cyrViolations);
+  appendViolationGroup(fragment, "tech", "Аббревиатуры", techViolations);
   appendOcrIssueRows(fragment);
   appendCheckedWordsGroup(fragment);
   violationsList.appendChild(fragment);
@@ -943,7 +1181,7 @@ function renderViolations() {
 
 function appendViolationGroup(
   fragment: DocumentFragment,
-  groupKey: "lat" | "cyr",
+  groupKey: "lat" | "cyr" | "tech",
   title: string,
   violations: Violation[],
 ) {
@@ -978,11 +1216,12 @@ function appendViolationGroup(
 
 function createViolationRow(violation: Violation): HTMLLIElement {
   const uiText = getViolationUiText(violation);
-  const typeClass = violation.type === "LAT_PROHIBITED" ? "lat" : "cyr";
+  const typeClass = violation.type === "LAT_PROHIBITED" ? "lat" : violation.type === "CYR_NOT_IN_DICT" ? "cyr" : "tech";
   const replacementText = violation.replacements.join(" / ") || "нет";
   const preferred = violation.replacements[0] ?? "";
   const hasReplacement = preferred.length > 0;
   const previewViolationId = violation.id ?? "";
+  const confidenceNote = violation.uncertain ? "не уверены на 100%" : "уверенно";
   const row = document.createElement("li");
   row.className = `violation-row vtype-${typeClass}`;
   if (previewViolationId) {
@@ -997,6 +1236,7 @@ function createViolationRow(violation: Violation): HTMLLIElement {
     ${hasReplacement ? `<button class="vr-action btn-ghost" type="button">в словарь</button>` : `<span></span>`}
     <div class="violation-details">
       <div><b>${escapeHtml(uiText.issueTitle)}</b> (${escapeHtml(uiText.confidenceLabel)})</div>
+      <div><b>Уверенность:</b> ${escapeHtml(confidenceNote)}</div>
       <div><b>Юридическая критичность:</b> ${escapeHtml(uiText.legalSeverityLabel)}</div>
       <div><b>Норма закона:</b> ${
         violation.normUrl
@@ -1004,6 +1244,7 @@ function createViolationRow(violation: Violation): HTMLLIElement {
           : escapeHtml(violation.norm)
       }</div>
       <div><b>Рекомендуемая замена:</b> ${escapeHtml(replacementText)}</div>
+      ${violation.explanation ? `<div><b>Пояснение:</b> ${escapeHtml(violation.explanation)}</div>` : ""}
     </div>
   `;
   const actionButton = row.querySelector<HTMLButtonElement>(".vr-action");
@@ -1074,7 +1315,13 @@ function createCheckedWordRow(item: CheckedWord): HTMLLIElement {
   const row = document.createElement("li");
   row.className = "violation-row violation-row--ok preview-link";
   row.dataset.previewViolationId = item.id;
-  row.innerHTML = `<span class="vr-word">${escapeHtml(item.word)}</span>`;
+  const uncertainBadge = item.uncertain ? `<span class="job-type-badge">не уверены на 100%</span>` : "";
+  row.innerHTML = `
+    <span class="vr-word">${escapeHtml(item.word)}</span>
+    <span class="secondary-row-meta">${escapeHtml(item.statusLabel ?? "можно использовать")}</span>
+    ${uncertainBadge}
+  `;
+  if (item.details) row.title = item.details;
   row.addEventListener("click", () => {
     highlightViolationCard(item.id);
     previewHandle?.focusViolation(item.id);
@@ -1087,12 +1334,65 @@ function updateCheckerSplitVisibility() {
   checkerSplit.classList.toggle("hidden", !shouldShow);
 }
 
-function renderStatus() {
-  if (!state.dictionarySqlite) {
-    showStatus("warn", "Загрузка словаря SQLite…");
-  } else {
-    showStatus("ok", "✓ Сервис готов к проверке");
+async function prepareLookupDb(options: { forceRefresh?: boolean } = {}) {
+  if (state.lookupDbLoading) return;
+  state.lookupDbLoading = true;
+  state.lookupDbProgressLabel = "Подготавливаем словарную базу...";
+  renderStatus();
+  try {
+    const result = await ensureLookupDb({
+      forceRefresh: options.forceRefresh ?? false,
+      onProgress: (progress: LookupProgress) => {
+        if (!progress.message) return;
+        state.lookupDbProgressLabel = progress.total && progress.loaded
+          ? `${progress.message} ${Math.round((progress.loaded / progress.total) * 100)}%`
+          : progress.message;
+        showNotice("warn", state.lookupDbProgressLabel);
+        renderStatus();
+      },
+    });
+    state.lookupDb = result.db;
+    state.lookupDbReady = true;
+    state.lookupDbVersion = result.manifest.version;
+    state.lookupDbProgressLabel = "";
+    renderStatus();
+    clearNotice();
+    if (options.forceRefresh) {
+      showNotice("ok", "Словарная база обновлена.");
+    }
+  } catch (error) {
+    console.error("Lookup DB initialization failed:", error);
+    state.lookupDb = null;
+    state.lookupDbReady = false;
+    state.lookupDbProgressLabel = "";
+    renderStatus();
+    showNotice("error", "Не удалось подготовить словарную базу.");
+  } finally {
+    state.lookupDbLoading = false;
   }
+}
+
+function renderStatus() {
+  const shouldDisableRun = state.lookupDbLoading || !state.lookupDbReady || state.isChecking;
+  runCheckBtn.disabled = shouldDisableRun;
+  if (!state.isChecking) {
+    runCheckBtn.textContent = RUN_CHECK_DEFAULT_LABEL;
+  }
+  if (state.lookupDbLoading) {
+    apiKeyNavDisplay.textContent = state.lookupDbProgressLabel || "база загружается...";
+    showStatus("warn", "Словарная база загружается.");
+    return;
+  }
+  if (!state.lookupDbReady) {
+    apiKeyNavDisplay.textContent = "база не готова";
+    showStatus("error", "Словарная база недоступна.");
+    return;
+  }
+  const versionLabel = state.lookupDbVersion || getLookupDbVersion();
+  apiKeyNavDisplay.textContent = versionLabel
+    ? `база: ${versionLabel.slice(0, 12)}...`
+    : "база готова";
+  showStatus("ok", "✓ Сервис готов к проверке");
 }
 
 function showStatus(level: "ok" | "warn" | "error", label: string) {
@@ -1108,6 +1408,77 @@ function showNotice(level: "ok" | "warn" | "error", label: string) {
   techHint.classList.remove("hidden");
 }
 
+function findMatchingRuleForWord(normalized: string, lemma: string): RuleEntry | null {
+  const matches = state.rulesUser.filter((rule) => {
+    if (rule.phrase === normalized) return true;
+    if (rule.applyToInflections && lemma && rule.phrase === lemma) return true;
+    return false;
+  });
+  if (!matches.length) return null;
+  const deny = matches.find((rule) => rule.mode === "deny");
+  return deny ?? matches[0];
+}
+
+function isAllowedByBuiltinTerms(normalized: string): boolean {
+  const terms = state.trademarksBuiltIn.map((item) => item.name.toLowerCase());
+  if (terms.includes(normalized)) return true;
+  if (!normalized.includes("-")) return false;
+  return normalized.split("-").some((part) => terms.includes(part));
+}
+
+async function runSingleWordCheck() {
+  const value = singleWordInput.value.trim();
+  if (!value) {
+    singleWordResult.className = "hint warn";
+    singleWordResult.textContent = "Введите слово для проверки.";
+    singleWordResult.classList.remove("hidden");
+    return;
+  }
+  if (!state.lookupDbReady || !state.lookupDb) {
+    singleWordResult.className = "hint warn";
+    singleWordResult.textContent = "Словарная база не готова. Дождитесь загрузки.";
+    singleWordResult.classList.remove("hidden");
+    return;
+  }
+
+  const verification = await verifyWord(state.lookupDb, value);
+  const matchingRule = findMatchingRuleForWord(verification.normalizedWord, verification.lemma);
+  const allowedByBuiltin = isAllowedByBuiltinTerms(verification.normalizedWord);
+  const hasLatin = /[A-Za-z]/.test(value);
+  const dictionaryFound = verification.status !== "no_match";
+
+  let statusLabel = "можно использовать";
+  let level: "ok" | "warn" | "error" = "ok";
+  if (matchingRule?.mode === "deny") {
+    statusLabel = "нельзя по правилам";
+    level = "error";
+  } else if (matchingRule?.mode === "allow") {
+    statusLabel = "можно по правилам";
+    level = "ok";
+  } else if (allowedByBuiltin) {
+    statusLabel = "можно использовать";
+    level = "ok";
+  } else if (hasLatin) {
+    statusLabel = "нельзя использовать";
+    level = "error";
+  } else if (!dictionaryFound) {
+    statusLabel = "нельзя использовать";
+    level = "error";
+  }
+
+  const uncertainLabel = verification.uncertain ? " · не уверены на 100%" : "";
+  const details = verification.matches.length
+    ? verification.matches.slice(0, 3).map((match) =>
+      `${match.dictionaryTitle}, стр. ${match.pageStart}-${match.pageEnd}`).join("; ")
+    : verification.compoundParts.length
+      ? `Составные части: ${verification.compoundParts.join(" + ")}`
+      : "Нет словарных совпадений.";
+
+  singleWordResult.className = `hint ${level}`;
+  singleWordResult.textContent = `${statusLabel}${uncertainLabel}. ${details}`;
+  singleWordResult.classList.remove("hidden");
+}
+
 function clearNotice() {
   techHint.classList.add("hidden");
   techHint.textContent = "";
@@ -1116,6 +1487,9 @@ function clearNotice() {
 
 function getOverallStatus(violations: Violation[]): { level: "ok" | "warn" | "error"; label: string } {
   if (!violations.length) return { level: "ok", label: "✓ Нарушений не найдено" };
+  if (violations.every((item) => item.type === "TECH_ABBREV")) {
+    return { level: "warn", label: `⚠ Найдено ${violations.length} спорных аббревиатур` };
+  }
   return { level: "error", label: `✗ Найдено ${violations.length} нарушений` };
 }
 
@@ -1128,9 +1502,17 @@ function getViolationUiText(violation: Violation): ViolationUiText {
     };
   }
 
+  if (violation.type === "CYR_NOT_IN_DICT") {
+    return {
+      issueTitle: "Слово не найдено в нормативных словарях.",
+      legalSeverityLabel: "высокая",
+      confidenceLabel: "средняя",
+    };
+  }
+
   return {
-    issueTitle: "Слово не найдено в нормативных словарях.",
-    legalSeverityLabel: "высокая",
+    issueTitle: "Техническая аббревиатура (спорная зона).",
+    legalSeverityLabel: "низкая",
     confidenceLabel: "средняя",
   };
 }
@@ -1150,6 +1532,7 @@ function saveRuleFromForm() {
   if (!phrase) return;
   const mode: RuleEntry["mode"] = ruleModeInput.value === "deny" ? "deny" : "allow";
   const reason = ruleReasonInput.value.trim();
+  const applyToInflections = ruleApplyToInflectionsInput.checked;
   const replacements = mode === "deny"
     ? ruleReplacementsInput.value
         .split(",")
@@ -1158,13 +1541,14 @@ function saveRuleFromForm() {
     : [];
   const next: RuleEntry[] = [
     ...state.rulesUser.filter((item) => item.phrase.toLowerCase() !== phrase),
-    { phrase, mode, reason, replacements },
+    { phrase, mode, reason, replacements, applyToInflections },
   ];
   state.rulesUser = next;
   saveRulesUser(localStorage, state.rulesUser);
   rulePhraseInput.value = "";
   ruleReasonInput.value = "";
   ruleModeInput.value = "allow";
+  ruleApplyToInflectionsInput.checked = false;
   syncRulesFormState();
   renderRulesRows();
   showNotice("ok", "Правило сохранено.");
@@ -1197,6 +1581,7 @@ function renderRulesRows() {
         <span class="job-type-badge">${item.mode === "allow" ? "можно" : "нельзя"}</span>
       </div>
       <div class="secondary-row-meta"><b>Причина:</b> ${escapeHtml(item.reason || "—")}</div>
+      <div class="secondary-row-meta"><b>Словоформы:</b> ${item.applyToInflections ? "да" : "нет"}</div>
       <div class="secondary-row-meta"><b>Замены:</b> ${escapeHtml(item.replacements.join(", ") || "—")}</div>
       <button data-remove-rule="${escapeHtml(item.phrase)}" class="btn-ghost btn-sm btn-danger-ghost" type="button">Удалить</button>
     `;
@@ -1364,20 +1749,13 @@ function appendHistoryEntryFromJob(job: CheckJob) {
   renderHistoryRows();
 }
 
-function mapLegacyViolation(violation: Violation): Violation {
-  const t = violation.type as string;
-  if (t === "CYR_NOT_IN_DICT" || t === "LAT_PROHIBITED") return violation;
-  return { ...violation, type: "LAT_PROHIBITED", risk: "HIGH" };
-}
-
 function normalizeHistoryEntry(entry: LegacyHistoryEntry): HistoryEntry {
-  const raw = (entry.combinedViolations ?? entry.result?.combinedViolations ?? []).map((v) =>
-    mapLegacyViolation(v as Violation),
+  const normalizedViolations = (entry.combinedViolations ?? entry.result?.combinedViolations ?? []).map(
+    (violation, idx) => ({
+      ...violation,
+      id: violation.id ?? `history-${idx + 1}`,
+    }),
   );
-  const normalizedViolations = raw.map((violation, idx) => ({
-    ...violation,
-    id: violation.id ?? `history-${idx + 1}`,
-  }));
   return {
     id: entry.id ?? crypto.randomUUID(),
     createdAt: entry.createdAt ?? new Date().toISOString(),
@@ -1464,7 +1842,7 @@ function renderImageOcrOverlays(doc: Document): ImageOverlayHandle | null {
         violationId: violation.id ?? "",
         start: violation.position.start,
         end: violation.position.end,
-        kind: "violation",
+        kind: violation.type === "TECH_ABBREV" ? "tech" : "violation",
       })),
     }));
 
@@ -1485,13 +1863,24 @@ function buildOverlayRanges(
 ): OverlayRange[] {
   const kindByIndex: OverlayRange["kind"][] = Array.from({ length: textLength }, () => "ok");
   const idByIndex: Array<string | undefined> = Array.from({ length: textLength }, () => undefined);
+  let skippedNoId = 0;
   violations.forEach((violation) => {
     const violationId = violation.id;
-    if (!violationId) return;
+    if (!violationId) {
+      skippedNoId += 1;
+      return;
+    }
+    const kind: OverlayRange["kind"] = violation.type === "TECH_ABBREV" ? "tech" : "violation";
     const start = Math.max(0, violation.position.start);
     const end = Math.min(textLength, violation.position.end);
     for (let i = start; i < end; i += 1) {
-      kindByIndex[i] = "violation";
+      if (kind === "violation") {
+        kindByIndex[i] = "violation";
+        idByIndex[i] = violationId;
+        continue;
+      }
+      if (kindByIndex[i] === "violation") continue;
+      kindByIndex[i] = "tech";
       idByIndex[i] = violationId;
     }
   });
@@ -1529,6 +1918,14 @@ function highlightViolationCard(violationId: string) {
   violationsList.querySelectorAll<HTMLElement>(".violation-card").forEach((card) => {
     card.classList.toggle("active-preview", card.dataset.previewViolationId === violationId);
   });
+}
+
+function isCyrillicWord(value: string): boolean {
+  return /^[а-яё-]+$/i.test(value);
+}
+
+function isLatinWord(value: string): boolean {
+  return /^[a-z-]+$/i.test(value);
 }
 
 function escapeHtml(value: string): string {

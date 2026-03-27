@@ -35,6 +35,7 @@ export function loadRulesUser(storage: Pick<Storage, "getItem">): RuleEntry[] {
         phrase: item.original,
         mode: "deny",
         reason: "",
+        applyToInflections: false,
         replacements: item.replacements,
       }))
       .filter((item): item is RuleEntry => Boolean(item));

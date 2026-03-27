@@ -3,6 +3,7 @@ export interface RuleEntry {
   mode: "allow" | "deny";
   reason: string;
   replacements: string[];
+  applyToInflections: boolean;
 }
 
 export interface RuleGlossaryEntry {
@@ -57,7 +58,8 @@ export function normalizeRuleEntry(value: Partial<RuleEntry>): RuleEntry | null 
   const mode: RuleEntry["mode"] = value.mode === "deny" ? "deny" : "allow";
   const reason = (value.reason ?? "").trim();
   const replacements = mode === "deny" ? (value.replacements ?? []).slice(0, 5) : [];
-  return { phrase, mode, reason, replacements };
+  const applyToInflections = Boolean(value.applyToInflections);
+  return { phrase, mode, reason, replacements, applyToInflections };
 }
 
 export function buildRulesContext(rules: RuleEntry[]): RulesContext {

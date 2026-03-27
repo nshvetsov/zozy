@@ -4,14 +4,14 @@ import { buildRulesCsv, parseRulesCsv } from "./csv";
 describe("rules/csv", () => {
   it("parses new rules csv format", () => {
     const content = [
-      "phrase,mode,reason,replacements",
-      "\"vr\",\"deny\",\"латиница\",\"виртуальная реальность|ВР\"",
-      "\"орифлейм\",\"allow\",\"бренд\",\"\"",
+      "phrase,mode,reason,apply_to_inflections,replacements",
+      "\"vr\",\"deny\",\"латиница\",\"1\",\"виртуальная реальность|ВР\"",
+      "\"орифлейм\",\"allow\",\"бренд\",\"0\",\"\"",
     ].join("\n");
     const parsed = parseRulesCsv(content);
     expect(parsed).toEqual([
-      { phrase: "vr", mode: "deny", reason: "латиница", replacements: ["виртуальная реальность", "ВР"] },
-      { phrase: "орифлейм", mode: "allow", reason: "бренд", replacements: [] },
+      { phrase: "vr", mode: "deny", reason: "латиница", applyToInflections: true, replacements: ["виртуальная реальность", "ВР"] },
+      { phrase: "орифлейм", mode: "allow", reason: "бренд", applyToInflections: false, replacements: [] },
     ]);
   });
 
@@ -22,17 +22,17 @@ describe("rules/csv", () => {
     ].join("\n");
     const parsed = parseRulesCsv(content);
     expect(parsed).toEqual([
-      { phrase: "vr", mode: "deny", reason: "", replacements: ["виртуальная реальность", "ВР"] },
+      { phrase: "vr", mode: "deny", reason: "", applyToInflections: false, replacements: ["виртуальная реальность", "ВР"] },
     ]);
   });
 
   it("builds csv rows for export", () => {
     const csv = buildRulesCsv([
-      { phrase: "vr", mode: "deny", reason: "латиница", replacements: ["виртуальная реальность"] },
-      { phrase: "орифлейм", mode: "allow", reason: "бренд", replacements: [] },
+      { phrase: "vr", mode: "deny", reason: "латиница", applyToInflections: true, replacements: ["виртуальная реальность"] },
+      { phrase: "орифлейм", mode: "allow", reason: "бренд", applyToInflections: false, replacements: [] },
     ]);
-    expect(csv).toContain("phrase,mode,reason,replacements");
-    expect(csv).toContain("\"vr\",\"deny\",\"латиница\",\"виртуальная реальность\"");
-    expect(csv).toContain("\"орифлейм\",\"allow\",\"бренд\",\"\"");
+    expect(csv).toContain("phrase,mode,reason,apply_to_inflections,replacements");
+    expect(csv).toContain("\"vr\",\"deny\",\"латиница\",\"1\",\"виртуальная реальность\"");
+    expect(csv).toContain("\"орифлейм\",\"allow\",\"бренд\",\"0\",\"\"");
   });
 });

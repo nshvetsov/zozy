@@ -39,6 +39,7 @@ export function parseRulesCsv(content: string): RuleEntry[] {
         phrase: row.phrase ?? "",
         mode: row.mode === "deny" ? "deny" : "allow",
         reason: row.reason ?? "",
+        applyToInflections: row.apply_to_inflections === "1" || row.apply_to_inflections === "true",
         replacements: (row.replacements ?? "")
           .split("|")
           .map((x) => x.trim())
@@ -51,6 +52,7 @@ export function parseRulesCsv(content: string): RuleEntry[] {
       phrase: row.original ?? "",
       mode: "deny",
       reason: "",
+      applyToInflections: false,
       replacements: (row.replacements ?? "")
         .split("|")
         .map((x) => x.trim())
@@ -64,6 +66,7 @@ export function buildRulesCsv(rules: RuleEntry[]): string {
     phrase: item.phrase,
     mode: item.mode,
     reason: item.reason,
+    apply_to_inflections: item.applyToInflections ? "1" : "0",
     replacements: item.replacements.join("|"),
   }));
   return toCsvRows(rows);

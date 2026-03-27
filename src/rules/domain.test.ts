@@ -14,6 +14,7 @@ describe("rules/domain", () => {
       mode: "deny",
       reason: "test",
       replacements: ["ВР", "Промо"],
+      applyToInflections: false,
     });
   });
 
@@ -28,14 +29,15 @@ describe("rules/domain", () => {
       mode: "allow",
       reason: "",
       replacements: [],
+      applyToInflections: false,
     });
   });
 
   it("builds allow and deny context", () => {
     const context = buildRulesContext([
-      { phrase: "VR", mode: "deny", reason: "", replacements: ["виртуальная реальность"] },
-      { phrase: "орифлейм", mode: "deny", reason: "", replacements: ["Oriflame"] },
-      { phrase: "brand safe", mode: "allow", reason: "", replacements: [] },
+      { phrase: "VR", mode: "deny", reason: "", replacements: ["виртуальная реальность"], applyToInflections: false },
+      { phrase: "орифлейм", mode: "deny", reason: "", replacements: ["Oriflame"], applyToInflections: false },
+      { phrase: "brand safe", mode: "allow", reason: "", replacements: [], applyToInflections: false },
     ]);
     expect(context.allowTerms).toEqual(["brand safe"]);
     expect(context.denyGlossary).toEqual([

@@ -572,11 +572,26 @@ pre {
 
 .violation-row--ok {
   border-left-color: #27ae60;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(120px, 1fr) auto auto;
 }
 
 .violation-row--ok .vr-word {
   white-space: normal;
+}
+
+.single-word-checker {
+  display: grid;
+  gap: 8px;
+}
+
+.single-word-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.single-word-row input {
+  flex: 1 1 auto;
 }
 
 .violation-row--issue {
@@ -654,12 +669,24 @@ pre {
 }
 
 .rules-form {
-  grid-template-columns: 1.2fr 1.2fr 1.4fr 180px auto;
+  grid-template-columns: 1.2fr 1.2fr 1.4fr 180px auto auto;
 }
 
 .rules-form input:disabled {
   background: #f5f8fb;
   color: #8ba0b6;
+}
+
+.rules-inflection-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #476380;
+}
+
+.rules-inflection-toggle input {
+  width: auto;
 }
 
 .secondary-toolbar {
